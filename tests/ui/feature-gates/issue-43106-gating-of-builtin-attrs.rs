@@ -1,7 +1,4 @@
-//~ NOTE not a function
-//~| NOTE not a foreign function or static
-//~| NOTE cannot be applied to crates
-//~| NOTE not an `extern` block
+//~ NOTE not an `extern` block
 // This test enumerates as many compiler-builtin ungated attributes as
 // possible (that is, all the mutually compatible ones), and checks
 // that we get "expected" (*) warnings for each in the various weird
@@ -50,27 +47,45 @@
 #![macro_use] // (allowed if no argument; see issue-43160-gating-of-macro_use.rs)
 // skipping testing of cfg
 // skipping testing of cfg_attr
-#![should_panic] //~ WARN `#[should_panic]` only has an effect
-#![ignore] //~ WARN `#[ignore]` only has an effect on functions
+#![should_panic] //~ WARN attribute cannot be used on
+//~| WARN previously accepted
+//~| HELP can only be applied to
+//~| HELP remove the attribute
+#![ignore] //~ WARN attribute cannot be used on
+//~| WARN previously accepted
+//~| HELP can only be applied to
+//~| HELP remove the attribute
 #![no_implicit_prelude]
 #![reexport_test_harness_main = "2900"]
 // see gated-link-args.rs
 // see issue-43106-gating-of-macro_escape.rs for crate-level; but non crate-level is below at "2700"
 // (cannot easily test gating of crate-level #[no_std]; but non crate-level is below at "2600")
-#![proc_macro_derive(Test)] //~ WARN `#[proc_macro_derive]` only has an effect
+#![proc_macro_derive(Test)] //~ WARN attribute cannot be used on
+//~| WARN previously accepted
+//~| HELP can only be applied to
+//~| HELP remove the attribute
 #![doc = "2400"]
-#![cold] //~ WARN attribute should be applied to a function
-//~^ WARN this was previously accepted
+#![cold] //~ WARN attribute cannot be used on
+//~| WARN previously accepted
+//~| HELP can only be applied to
+//~| HELP remove the attribute
 #![link()] //~ WARN attribute should be applied to an `extern` block
 //~^ WARN this was previously accepted
 #![link_name = "1900"]
-//~^ WARN attribute should be applied to a foreign function
-//~^^ WARN this was previously accepted by the compiler
+//~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+//~| HELP can be applied to
+//~| HELP remove the attribute
 #![link_section = "1800"]
-//~^ WARN attribute should be applied to a function or static
-//~^^ WARN this was previously accepted by the compiler
+//~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+//~| HELP can be applied to
+//~| HELP remove the attribute
 #![must_use]
-//~^ WARN `#[must_use]` has no effect
+//~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+//~| HELP can be applied to
+//~| HELP remove the attribute
 // see issue-43106-gating-of-stable.rs
 // see issue-43106-gating-of-unstable.rs
 // see issue-43106-gating-of-deprecated.rs
@@ -174,16 +189,28 @@ mod macro_use {
     mod inner { #![macro_use] }
 
     #[macro_use] fn f() { }
-    //~^ WARN `#[macro_use]` only has an effect
+    //~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+    //~| HELP can be applied to
+    //~| HELP remove the attribute
 
     #[macro_use] struct S;
-    //~^ WARN `#[macro_use]` only has an effect
+    //~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+    //~| HELP can be applied to
+    //~| HELP remove the attribute
 
     #[macro_use] type T = S;
-    //~^ WARN `#[macro_use]` only has an effect
+    //~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+    //~| HELP can be applied to
+    //~| HELP remove the attribute
 
     #[macro_use] impl S { }
-    //~^ WARN `#[macro_use]` only has an effect
+    //~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+    //~| HELP can be applied to
+    //~| HELP remove the attribute
 }
 
 #[macro_export]
@@ -242,116 +269,186 @@ mod path {
     mod inner { #![path="3800"] }
 
     #[path = "3800"] fn f() { }
-    //~^ WARN `#[path]` only has an effect
+    //~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+    //~| HELP can only be applied to
+    //~| HELP remove the attribute
 
     #[path = "3800"]  struct S;
-    //~^ WARN `#[path]` only has an effect
+    //~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+    //~| HELP can only be applied to
+    //~| HELP remove the attribute
 
     #[path = "3800"] type T = S;
-    //~^ WARN `#[path]` only has an effect
+    //~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+    //~| HELP can only be applied to
+    //~| HELP remove the attribute
 
     #[path = "3800"] impl S { }
-    //~^ WARN `#[path]` only has an effect
+    //~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+    //~| HELP can only be applied to
+    //~| HELP remove the attribute
 }
 
 #[automatically_derived]
-//~^ WARN `#[automatically_derived]` only has an effect
+//~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+//~| HELP can only be applied to
+//~| HELP remove the attribute
 mod automatically_derived {
     mod inner { #![automatically_derived] }
-    //~^ WARN `#[automatically_derived]
+    //~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+    //~| HELP can only be applied to
+    //~| HELP remove the attribute
 
     #[automatically_derived] fn f() { }
-    //~^ WARN `#[automatically_derived]
+    //~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+    //~| HELP can only be applied to
+    //~| HELP remove the attribute
 
     #[automatically_derived] struct S;
-    //~^ WARN `#[automatically_derived]
+    //~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+    //~| HELP can only be applied to
+    //~| HELP remove the attribute
 
     #[automatically_derived] type T = S;
-    //~^ WARN `#[automatically_derived]
+    //~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+    //~| HELP can only be applied to
+    //~| HELP remove the attribute
 
     #[automatically_derived] trait W { }
-    //~^ WARN `#[automatically_derived]
+    //~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+    //~| HELP can only be applied to
+    //~| HELP remove the attribute
 
     #[automatically_derived] impl S { }
-    //~^ WARN `#[automatically_derived]
+    //~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+    //~| HELP can only be applied to
+    //~| HELP remove the attribute
 
     #[automatically_derived] impl W for S { }
 }
 
 #[no_mangle]
-//~^ WARN attribute should be applied to a free function, impl method or static [unused_attributes]
-//~| WARN this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+//~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+//~| HELP can be applied to
+//~| HELP remove the attribute
 mod no_mangle {
-    //~^ NOTE not a free function, impl method or static
     mod inner { #![no_mangle] }
-    //~^ WARN attribute should be applied to a free function, impl method or static [unused_attributes]
-    //~| WARN this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
-    //~| NOTE not a free function, impl method or static
+    //~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+    //~| HELP can be applied to
+    //~| HELP remove the attribute
 
     #[no_mangle] fn f() { }
 
     #[no_mangle] struct S;
-    //~^ WARN attribute should be applied to a free function, impl method or static [unused_attributes]
-    //~| WARN this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
-    //~| NOTE not a free function, impl method or static
+    //~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+    //~| HELP can be applied to
+    //~| HELP remove the attribute
 
     #[no_mangle] type T = S;
-    //~^ WARN attribute should be applied to a free function, impl method or static [unused_attributes]
-    //~| WARN this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
-    //~| NOTE not a free function, impl method or static
+    //~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+    //~| HELP can be applied to
+    //~| HELP remove the attribute
 
     #[no_mangle] impl S { }
-    //~^ WARN attribute should be applied to a free function, impl method or static [unused_attributes]
-    //~| WARN this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
-    //~| NOTE not a free function, impl method or static
+    //~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+    //~| HELP can be applied to
+    //~| HELP remove the attribute
 
     trait Tr {
         #[no_mangle] fn foo();
-        //~^ WARN attribute should be applied to a free function, impl method or static [unused_attributes]
-        //~| WARN this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
-        //~| NOTE not a free function, impl method or static
+        //~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+        //~| HELP can be applied to
+        //~| HELP remove the attribute
 
         #[no_mangle] fn bar() {}
-        //~^ WARN attribute should be applied to a free function, impl method or static [unused_attributes]
-        //~| WARN this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
-        //~| NOTE not a free function, impl method or static
+        //~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+        //~| HELP can be applied to
+        //~| HELP remove the attribute
     }
 }
 
 #[should_panic]
-//~^ WARN `#[should_panic]` only has an effect on
+//~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+//~| HELP can only be applied to
+//~| HELP remove the attribute
 mod should_panic {
     mod inner { #![should_panic] }
-    //~^ WARN `#[should_panic]` only has an effect on
+    //~^ WARN attribute cannot be used on
+    //~| WARN previously accepted
+    //~| HELP can only be applied to
+    //~| HELP remove the attribute
 
     #[should_panic] fn f() { }
 
     #[should_panic] struct S;
-    //~^ WARN `#[should_panic]` only has an effect on
+    //~^ WARN attribute cannot be used on
+    //~| WARN previously accepted
+    //~| HELP can only be applied to
+    //~| HELP remove the attribute
 
     #[should_panic] type T = S;
-    //~^ WARN `#[should_panic]` only has an effect on
+    //~^ WARN attribute cannot be used on
+    //~| WARN previously accepted
+    //~| HELP can only be applied to
+    //~| HELP remove the attribute
 
     #[should_panic] impl S { }
-    //~^ WARN `#[should_panic]` only has an effect on
+    //~^ WARN attribute cannot be used on
+    //~| WARN previously accepted
+    //~| HELP can only be applied to
+    //~| HELP remove the attribute
 }
 
 #[ignore]
-//~^ WARN `#[ignore]` only has an effect on functions
+//~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+//~| HELP can only be applied to
+//~| HELP remove the attribute
 mod ignore {
     mod inner { #![ignore] }
-    //~^ WARN `#[ignore]` only has an effect on functions
+    //~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+    //~| HELP can only be applied to
+    //~| HELP remove the attribute
 
     #[ignore] fn f() { }
 
     #[ignore] struct S;
-    //~^ WARN `#[ignore]` only has an effect on functions
+    //~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+    //~| HELP can only be applied to
+    //~| HELP remove the attribute
 
     #[ignore] type T = S;
-    //~^ WARN `#[ignore]` only has an effect on functions
+    //~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+    //~| HELP can only be applied to
+    //~| HELP remove the attribute
 
     #[ignore] impl S { }
-    //~^ WARN `#[ignore]` only has an effect on functions
+    //~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+    //~| HELP can only be applied to
+    //~| HELP remove the attribute
 }
 
 #[no_implicit_prelude]
@@ -359,16 +456,28 @@ mod no_implicit_prelude {
     mod inner { #![no_implicit_prelude] }
 
     #[no_implicit_prelude] fn f() { }
-    //~^ WARN `#[no_implicit_prelude]` only has an effect
+    //~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+    //~| HELP can be applied to
+    //~| HELP remove the attribute
 
     #[no_implicit_prelude] struct S;
-    //~^ WARN `#[no_implicit_prelude]` only has an effect
+    //~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+    //~| HELP can be applied to
+    //~| HELP remove the attribute
 
     #[no_implicit_prelude] type T = S;
-    //~^ WARN `#[no_implicit_prelude]` only has an effect
+    //~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+    //~| HELP can be applied to
+    //~| HELP remove the attribute
 
     #[no_implicit_prelude] impl S { }
-    //~^ WARN `#[no_implicit_prelude]` only has an effect
+    //~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+    //~| HELP can be applied to
+    //~| HELP remove the attribute
 }
 
 #[reexport_test_harness_main = "2900"]
@@ -399,16 +508,28 @@ mod macro_escape {
     //~| HELP try an outer attribute: `#[macro_use]`
 
     #[macro_escape] fn f() { }
-    //~^ WARN `#[macro_escape]` only has an effect
+    //~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+    //~| HELP can be applied to
+    //~| HELP remove the attribute
 
     #[macro_escape] struct S;
-    //~^ WARN `#[macro_escape]` only has an effect
+    //~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+    //~| HELP can be applied to
+    //~| HELP remove the attribute
 
     #[macro_escape] type T = S;
-    //~^ WARN `#[macro_escape]` only has an effect
+    //~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+    //~| HELP can be applied to
+    //~| HELP remove the attribute
 
     #[macro_escape] impl S { }
-    //~^ WARN `#[macro_escape]` only has an effect
+    //~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+    //~| HELP can be applied to
+    //~| HELP remove the attribute
 }
 
 #[no_std]
@@ -448,100 +569,114 @@ mod doc {
 }
 
 #[cold]
-//~^ WARN attribute should be applied to a function
-//~| WARN this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+//~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+//~| HELP can only be applied to
+//~| HELP remove the attribute
 mod cold {
-    //~^ NOTE not a function
 
     mod inner { #![cold] }
-    //~^ WARN attribute should be applied to a function
-    //~| WARN this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
-    //~| NOTE not a function
+    //~^ WARN attribute cannot be used on
+    //~| WARN previously accepted
+    //~| HELP can only be applied to
+    //~| HELP remove the attribute
 
     #[cold] fn f() { }
 
     #[cold] struct S;
-    //~^ WARN attribute should be applied to a function
-    //~| WARN this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
-    //~| NOTE not a function
+    //~^ WARN attribute cannot be used on
+    //~| WARN previously accepted
+    //~| HELP can only be applied to
+    //~| HELP remove the attribute
 
     #[cold] type T = S;
-    //~^ WARN attribute should be applied to a function
-    //~| WARN this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
-    //~| NOTE not a function
+    //~^ WARN attribute cannot be used on
+    //~| WARN previously accepted
+    //~| HELP can only be applied to
+    //~| HELP remove the attribute
 
     #[cold] impl S { }
-    //~^ WARN attribute should be applied to a function
-    //~| WARN this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
-    //~| NOTE not a function
+    //~^ WARN attribute cannot be used on
+    //~| WARN previously accepted
+    //~| HELP can only be applied to
+    //~| HELP remove the attribute
 }
 
 #[link_name = "1900"]
-//~^ WARN attribute should be applied to a foreign function or static [unused_attributes]
-//~| WARN this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+//~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+//~| HELP can be applied to
+//~| HELP remove the attribute
 mod link_name {
-    //~^ NOTE not a foreign function or static
-
     #[link_name = "1900"]
-    //~^ WARN attribute should be applied to a foreign function or static [unused_attributes]
-    //~| WARN this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
-    //~| HELP try `#[link(name = "1900")]` instead
+    //~^ WARN attribute cannot be used on
+    //~| WARN previously accepted
+    //~| HELP can be applied to
+    //~| HELP remove the attribute
     extern "C" { }
-    //~^ NOTE not a foreign function or static
 
     mod inner { #![link_name="1900"] }
-    //~^ WARN attribute should be applied to a foreign function or static [unused_attributes]
-    //~| WARN this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
-    //~| NOTE not a foreign function or static
+    //~^ WARN attribute cannot be used on
+    //~| WARN previously accepted
+    //~| HELP can be applied to
+    //~| HELP remove the attribute
 
     #[link_name = "1900"] fn f() { }
-    //~^ WARN attribute should be applied to a foreign function or static [unused_attributes]
-    //~| WARN this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
-    //~| NOTE not a foreign function or static
+    //~^ WARN attribute cannot be used on
+    //~| WARN previously accepted
+    //~| HELP can be applied to
+    //~| HELP remove the attribute
 
     #[link_name = "1900"] struct S;
-    //~^ WARN attribute should be applied to a foreign function or static [unused_attributes]
-    //~| WARN this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
-    //~| NOTE not a foreign function or static
+    //~^ WARN attribute cannot be used on
+    //~| WARN previously accepted
+    //~| HELP can be applied to
+    //~| HELP remove the attribute
 
     #[link_name = "1900"] type T = S;
-    //~^ WARN attribute should be applied to a foreign function or static [unused_attributes]
-    //~| WARN this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
-    //~| NOTE not a foreign function or static
+    //~^ WARN attribute cannot be used on
+    //~| WARN previously accepted
+    //~| HELP can be applied to
+    //~| HELP remove the attribute
 
     #[link_name = "1900"] impl S { }
-    //~^ WARN attribute should be applied to a foreign function or static [unused_attributes]
-    //~| WARN this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
-    //~| NOTE not a foreign function or static
+    //~^ WARN attribute cannot be used on
+    //~| WARN previously accepted
+    //~| HELP can be applied to
+    //~| HELP remove the attribute
 }
 
 #[link_section = "1800"]
-//~^ WARN attribute should be applied to a function or static [unused_attributes]
-//~| WARN this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+//~^ WARN attribute cannot be used on
+//~| WARN previously accepted
+//~| HELP can be applied to
+//~| HELP remove the attribute
 mod link_section {
-    //~^ NOTE not a function or static
-
     mod inner { #![link_section="1800"] }
-    //~^ WARN attribute should be applied to a function or static [unused_attributes]
-    //~| WARN this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
-    //~| NOTE not a function or static
+    //~^ WARN attribute cannot be used on
+    //~| WARN previously accepted
+    //~| HELP can be applied to
+    //~| HELP remove the attribute
 
     #[link_section = "1800"] fn f() { }
 
     #[link_section = "1800"] struct S;
-    //~^ WARN attribute should be applied to a function or static [unused_attributes]
-    //~| WARN this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
-    //~| NOTE not a function or static
+    //~^ WARN attribute cannot be used on
+    //~| WARN previously accepted
+    //~| HELP can be applied to
+    //~| HELP remove the attribute
 
     #[link_section = "1800"] type T = S;
-    //~^ WARN attribute should be applied to a function or static [unused_attributes]
-    //~| WARN this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
-    //~| NOTE not a function or static
+    //~^ WARN attribute cannot be used on
+    //~| WARN previously accepted
+    //~| HELP can be applied to
+    //~| HELP remove the attribute
 
     #[link_section = "1800"] impl S { }
-    //~^ WARN attribute should be applied to a function or static [unused_attributes]
-    //~| WARN this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
-    //~| NOTE not a function or static
+    //~^ WARN attribute cannot be used on
+    //~| WARN previously accepted
+    //~| HELP can be applied to
+    //~| HELP remove the attribute
 }
 
 
@@ -598,17 +733,29 @@ mod deprecated {
     #[deprecated] impl super::StructForDeprecated { }
 }
 
-#[must_use] //~ WARN `#[must_use]` has no effect
+#[must_use] //~ WARN attribute cannot be used on
+//~| WARN previously accepted
+//~| HELP can be applied to
+//~| HELP remove the attribute
 mod must_use {
-    mod inner { #![must_use] } //~ WARN `#[must_use]` has no effect
+    mod inner { #![must_use] } //~ WARN attribute cannot be used on
+    //~| WARN previously accepted
+    //~| HELP can be applied to
+    //~| HELP remove the attribute
 
     #[must_use] fn f() { }
 
     #[must_use] struct S;
 
-    #[must_use] type T = S; //~ WARN `#[must_use]` has no effect
+    #[must_use] type T = S; //~ WARN attribute cannot be used on
+    //~| WARN previously accepted
+    //~| HELP can be applied to
+    //~| HELP remove the attribute
 
-    #[must_use] impl S { } //~ WARN `#[must_use]` has no effect
+    #[must_use] impl S { } //~ WARN attribute cannot be used on
+    //~| WARN previously accepted
+    //~| HELP can be applied to
+    //~| HELP remove the attribute
 }
 
 #[windows_subsystem = "windows"]

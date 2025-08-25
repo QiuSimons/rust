@@ -12,13 +12,14 @@ use std::ffi::OsStr;
 use std::io::BufReader;
 use std::io::prelude::*;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 use std::{env, fs, str};
 
 use serde_derive::Deserialize;
 #[cfg(feature = "tracing")]
-use tracing::{instrument, span};
+use tracing::span;
 
-use crate::core::build_steps::gcc::{Gcc, add_cg_gcc_cargo_flags};
+use crate::core::build_steps::gcc::{Gcc, GccOutput, add_cg_gcc_cargo_flags};
 use crate::core::build_steps::tool::{RustcPrivateCompilers, SourceType, copy_lld_artifacts};
 use crate::core::build_steps::{dist, llvm};
 use crate::core::builder;
@@ -37,11 +38,12 @@ use crate::{
     debug, trace,
 };
 
-/// Build a standard library for the given `target` using the given `compiler`.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// Build a standard library for the given `target` using the given `build_compiler`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Std {
     pub target: TargetSelection,
-    pub compiler: Compiler,
+    /// Compiler that builds the standard library.
+    pub build_compiler: Compiler,
     /// Whether to build only a subset of crates in the standard library.
     ///
     /// This shouldn't be used from other steps; see the comment on [`Rustc`].
@@ -54,10 +56,10 @@ pub struct Std {
 }
 
 impl Std {
-    pub fn new(compiler: Compiler, target: TargetSelection) -> Self {
+    pub fn new(build_compiler: Compiler, target: TargetSelection) -> Self {
         Self {
             target,
-            compiler,
+            build_compiler,
             crates: Default::default(),
             force_recompile: false,
             extra_rust_args: &[],
@@ -104,7 +106,6 @@ impl Step for Std {
         run.crate_or_deps("sysroot").path("library")
     }
 
-    #[cfg_attr(feature = "tracing", instrument(level = "trace", name = "Std::make_run", skip_all))]
     fn make_run(run: RunConfig<'_>) {
         let crates = std_crates_for_run_make(&run);
         let builder = run.builder;
@@ -121,7 +122,7 @@ impl Step for Std {
         trace!(force_recompile);
 
         run.builder.ensure(Std {
-            compiler: run.builder.compiler(run.builder.top_stage, run.build_triple()),
+            build_compiler: run.builder.compiler(run.builder.top_stage, run.build_triple()),
             target: run.target,
             crates,
             force_recompile,
@@ -135,25 +136,12 @@ impl Step for Std {
     /// This will build the standard library for a particular stage of the build
     /// using the `compiler` targeting the `target` architecture. The artifacts
     /// created will also be linked into the sysroot directory.
-    #[cfg_attr(
-        feature = "tracing",
-        instrument(
-            level = "debug",
-            name = "Std::run",
-            skip_all,
-            fields(
-                target = ?self.target,
-                compiler = ?self.compiler,
-                force_recompile = self.force_recompile
-            ),
-        ),
-    )]
     fn run(self, builder: &Builder<'_>) {
         let target = self.target;
 
         // We already have std ready to be used for stage 0.
-        if self.compiler.stage == 0 {
-            let compiler = self.compiler;
+        if self.build_compiler.stage == 0 {
+            let compiler = self.build_compiler;
             builder.ensure(StdLink::from_std(self, compiler));
 
             return;
@@ -162,9 +150,10 @@ impl Step for Std {
         let build_compiler = if builder.download_rustc() && self.force_recompile {
             // When there are changes in the library tree with CI-rustc, we want to build
             // the stageN library and that requires using stageN-1 compiler.
-            builder.compiler(self.compiler.stage.saturating_sub(1), builder.config.host_target)
+            builder
+                .compiler(self.build_compiler.stage.saturating_sub(1), builder.config.host_target)
         } else {
-            self.compiler
+            self.build_compiler
         };
 
         // When using `download-rustc`, we already have artifacts for the host available. Don't
@@ -201,50 +190,49 @@ impl Step for Std {
 
         let mut target_deps = builder.ensure(StartupObjects { compiler: build_compiler, target });
 
-        let compiler_to_use =
-            builder.compiler_for(build_compiler.stage, build_compiler.host, target);
-        trace!(?compiler_to_use);
+        // Stage of the stdlib that we're building
+        let stage = build_compiler.stage;
 
-        if compiler_to_use != build_compiler
-            // Never uplift std unless we have compiled stage 1; if stage 1 is compiled,
-            // uplift it from there.
-            //
-            // FIXME: improve `fn compiler_for` to avoid adding stage condition here.
-            && build_compiler.stage > 1
+        // If we're building a stage2+ libstd, full bootstrap is
+        // disabled and we have a stage1 libstd already compiled for the given target,
+        // then simply uplift a previously built stage1 library.
+        if build_compiler.stage > 1
+            && !builder.config.full_bootstrap
+            // This estimates if a stage1 libstd exists for the given target. If we're not
+            // cross-compiling, it should definitely exist by the time we're building a stage2
+            // libstd.
+            // Or if we are cross-compiling, and we are building a cross-compiled rustc, then that
+            // rustc needs to link to a cross-compiled libstd, so again we should have a stage1
+            // libstd for the given target prepared.
+            // Even if we guess wrong in the cross-compiled case, the worst that should happen is
+            // that we build a fresh stage1 libstd below, and then we immediately uplift it, so we
+            // don't pay the libstd build cost twice.
+            && (target == builder.host_target || builder.config.hosts.contains(&target))
         {
-            trace!(
-                ?compiler_to_use,
-                ?build_compiler,
-                "build_compiler != compiler_to_use, uplifting library"
-            );
+            let build_compiler_for_std_to_uplift = builder.compiler(1, builder.host_target);
+            builder.std(build_compiler_for_std_to_uplift, target);
 
-            builder.std(compiler_to_use, target);
-            let msg = if compiler_to_use.host == target {
+            let msg = if build_compiler_for_std_to_uplift.host == target {
                 format!(
-                    "Uplifting library (stage{} -> stage{})",
-                    compiler_to_use.stage, build_compiler.stage
+                    "Uplifting library (stage{} -> stage{stage})",
+                    build_compiler_for_std_to_uplift.stage
                 )
             } else {
                 format!(
-                    "Uplifting library (stage{}:{} -> stage{}:{})",
-                    compiler_to_use.stage, compiler_to_use.host, build_compiler.stage, target
+                    "Uplifting library (stage{}:{} -> stage{stage}:{target})",
+                    build_compiler_for_std_to_uplift.stage, build_compiler_for_std_to_uplift.host,
                 )
             };
+
             builder.info(&msg);
 
             // Even if we're not building std this stage, the new sysroot must
             // still contain the third party objects needed by various targets.
             self.copy_extra_objects(builder, &build_compiler, target);
 
-            builder.ensure(StdLink::from_std(self, compiler_to_use));
+            builder.ensure(StdLink::from_std(self, build_compiler_for_std_to_uplift));
             return;
         }
-
-        trace!(
-            ?compiler_to_use,
-            ?build_compiler,
-            "compiler == compiler_to_use, handling not-cross-compile scenario"
-        );
 
         target_deps.extend(self.copy_extra_objects(builder, &build_compiler, target));
 
@@ -313,7 +301,7 @@ impl Step for Std {
     }
 
     fn metadata(&self) -> Option<StepMetadata> {
-        Some(StepMetadata::build("std", self.target).built_by(self.compiler))
+        Some(StepMetadata::build("std", self.target).built_by(self.build_compiler))
     }
 }
 
@@ -679,6 +667,14 @@ pub fn std_cargo(builder: &Builder<'_>, target: TargetSelection, cargo: &mut Car
     cargo.rustdocflag("-Zcrate-attr=warn(rust_2018_idioms)");
 }
 
+/// Link all libstd rlibs/dylibs into a sysroot of `target_compiler`.
+///
+/// Links those artifacts generated by `compiler` to the `stage` compiler's
+/// sysroot for the specified `host` and `target`.
+///
+/// Note that this assumes that `compiler` has already generated the libstd
+/// libraries for `target`, and this method will find them in the relevant
+/// output directory.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StdLink {
     pub compiler: Compiler,
@@ -694,7 +690,7 @@ impl StdLink {
     pub fn from_std(std: Std, host_compiler: Compiler) -> Self {
         Self {
             compiler: host_compiler,
-            target_compiler: std.compiler,
+            target_compiler: std.build_compiler,
             target: std.target,
             crates: std.crates,
             force_recompile: std.force_recompile,
@@ -717,19 +713,6 @@ impl Step for StdLink {
     /// Note that this assumes that `compiler` has already generated the libstd
     /// libraries for `target`, and this method will find them in the relevant
     /// output directory.
-    #[cfg_attr(
-        feature = "tracing",
-        instrument(
-            level = "trace",
-            name = "StdLink::run",
-            skip_all,
-            fields(
-                compiler = ?self.compiler,
-                target_compiler = ?self.target_compiler,
-                target = ?self.target
-            ),
-        ),
-    )]
     fn run(self, builder: &Builder<'_>) {
         let compiler = self.compiler;
         let target_compiler = self.target_compiler;
@@ -895,15 +878,6 @@ impl Step for StartupObjects {
     /// They don't require any library support as they're just plain old object
     /// files, so we just use the nightly snapshot compiler to always build them (as
     /// no other compilers are guaranteed to be available).
-    #[cfg_attr(
-        feature = "tracing",
-        instrument(
-            level = "trace",
-            name = "StartupObjects::run",
-            skip_all,
-            fields(compiler = ?self.compiler, target = ?self.target),
-        ),
-    )]
     fn run(self, builder: &Builder<'_>) -> Vec<(PathBuf, DependencyType)> {
         let for_compiler = self.compiler;
         let target = self.target;
@@ -960,13 +934,22 @@ fn cp_rustc_component_to_ci_sysroot(builder: &Builder<'_>, sysroot: &Path, conte
     }
 }
 
+/// Represents information about a built rustc.
+#[derive(Clone, Debug)]
+pub struct BuiltRustc {
+    /// The compiler that actually built this *rustc*.
+    /// This can be different from the *build_compiler* passed to the `Rustc` step because of
+    /// uplifting.
+    pub build_compiler: Compiler,
+}
+
 /// Build rustc using the passed `build_compiler`.
 ///
 /// - Makes sure that `build_compiler` has a standard library prepared for its host target,
 ///   so that it can compile build scripts and proc macros when building this `rustc`.
 /// - Makes sure that `build_compiler` has a standard library prepared for `target`,
 ///   so that the built `rustc` can *link to it* and use it at runtime.
-#[derive(Debug, PartialOrd, Ord, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Rustc {
     /// The target on which rustc will run (its host).
     pub target: TargetSelection,
@@ -987,15 +970,9 @@ impl Rustc {
 }
 
 impl Step for Rustc {
-    /// We return the stage of the "actual" compiler (not the uplifted one).
-    ///
-    /// By "actual" we refer to the uplifting logic where we may not compile the requested stage;
-    /// instead, we uplift it from the previous stages. Which can lead to bootstrap failures in
-    /// specific situations where we request stage X from other steps. However we may end up
-    /// uplifting it from stage Y, causing the other stage to fail when attempting to link with
-    /// stage X which was never actually built.
-    type Output = u32;
-    const ONLY_HOSTS: bool = true;
+    type Output = BuiltRustc;
+
+    const IS_HOST: bool = true;
     const DEFAULT: bool = false;
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
@@ -1033,16 +1010,7 @@ impl Step for Rustc {
     /// This will build the compiler for a particular stage of the build using
     /// the `build_compiler` targeting the `target` architecture. The artifacts
     /// created will also be linked into the sysroot directory.
-    #[cfg_attr(
-        feature = "tracing",
-        instrument(
-            level = "debug",
-            name = "Rustc::run",
-            skip_all,
-            fields(previous_compiler = ?self.build_compiler, target = ?self.target),
-        ),
-    )]
-    fn run(self, builder: &Builder<'_>) -> u32 {
+    fn run(self, builder: &Builder<'_>) -> Self::Output {
         let build_compiler = self.build_compiler;
         let target = self.target;
 
@@ -1058,7 +1026,7 @@ impl Step for Rustc {
                 &sysroot,
                 builder.config.ci_rustc_dev_contents(),
             );
-            return build_compiler.stage;
+            return BuiltRustc { build_compiler };
         }
 
         // Build a standard library for `target` using the `build_compiler`.
@@ -1070,33 +1038,45 @@ impl Step for Rustc {
 
             builder.info("WARNING: Using a potentially old librustc. This may not behave well.");
             builder.info("WARNING: Use `--keep-stage-std` if you want to rebuild the compiler when it changes");
-            builder.ensure(RustcLink::from_rustc(self, build_compiler));
+            builder.ensure(RustcLink::from_rustc(self));
 
-            return build_compiler.stage;
+            return BuiltRustc { build_compiler };
         }
 
-        let compiler_to_use =
-            builder.compiler_for(build_compiler.stage, build_compiler.host, target);
-        if compiler_to_use != build_compiler {
-            builder.ensure(Rustc::new(compiler_to_use, target));
-            let msg = if compiler_to_use.host == target {
-                format!(
-                    "Uplifting rustc (stage{} -> stage{})",
-                    compiler_to_use.stage,
-                    build_compiler.stage + 1
-                )
-            } else {
-                format!(
-                    "Uplifting rustc (stage{}:{} -> stage{}:{})",
-                    compiler_to_use.stage,
-                    compiler_to_use.host,
-                    build_compiler.stage + 1,
-                    target
-                )
-            };
+        // The stage of the compiler that we're building
+        let stage = build_compiler.stage + 1;
+
+        // If we are building a stage3+ compiler, and full bootstrap is disabled, and we have a
+        // previous rustc available, we will uplift a compiler from a previous stage.
+        // We do not allow cross-compilation uplifting here, because there it can be quite tricky
+        // to figure out which stage actually built the rustc that should be uplifted.
+        if build_compiler.stage >= 2
+            && !builder.config.full_bootstrap
+            && target == builder.host_target
+        {
+            // Here we need to determine the **build compiler** that built the stage that we will
+            // be uplifting. We cannot uplift stage 1, as it has a different ABI than stage 2+,
+            // so we always uplift the stage2 compiler (compiled with stage 1).
+            let uplift_build_compiler = builder.compiler(1, build_compiler.host);
+
+            let msg = format!("Uplifting rustc from stage2 to stage{stage})");
             builder.info(&msg);
-            builder.ensure(RustcLink::from_rustc(self, compiler_to_use));
-            return compiler_to_use.stage;
+
+            // Here the compiler that built the rlibs (`uplift_build_compiler`) can be different
+            // from the compiler whose sysroot should be modified in this step. So we need to copy
+            // the (previously built) rlibs into the correct sysroot.
+            builder.ensure(RustcLink::from_build_compiler_and_sysroot(
+                // This is the compiler that actually built the rustc rlibs
+                uplift_build_compiler,
+                // We copy the rlibs into the sysroot of `build_compiler`
+                build_compiler,
+                target,
+                self.crates,
+            ));
+
+            // Here we have performed an uplift, so we return the actual build compiler that "built"
+            // this rustc.
+            return BuiltRustc { build_compiler: uplift_build_compiler };
         }
 
         // Build a standard library for the current host target using the `build_compiler`.
@@ -1169,12 +1149,8 @@ impl Step for Rustc {
             strip_debug(builder, target, &target_root_dir.join("rustc-main"));
         }
 
-        builder.ensure(RustcLink::from_rustc(
-            self,
-            builder.compiler(build_compiler.stage, builder.config.host_target),
-        ));
-
-        build_compiler.stage
+        builder.ensure(RustcLink::from_rustc(self));
+        BuiltRustc { build_compiler }
     }
 
     fn metadata(&self) -> Option<StepMetadata> {
@@ -1397,6 +1373,7 @@ pub fn rustc_cargo_env(builder: &Builder<'_>, cargo: &mut Cargo, target: TargetS
 
     // Build jemalloc on AArch64 with support for page sizes up to 64K
     // See: https://github.com/rust-lang/rust/pull/135081
+    // See also the "JEMALLOC_SYS_WITH_LG_PAGE" setting in the tool build step.
     if builder.config.jemalloc(target)
         && target.starts_with("aarch64")
         && env::var_os("JEMALLOC_SYS_WITH_LG_PAGE").is_none()
@@ -1417,8 +1394,8 @@ fn rustc_llvm_env(builder: &Builder<'_>, cargo: &mut Cargo, target: TargetSelect
     if builder.config.llvm_enzyme {
         cargo.env("LLVM_ENZYME", "1");
     }
-    let llvm::LlvmResult { llvm_config, .. } = builder.ensure(llvm::Llvm { target });
-    cargo.env("LLVM_CONFIG", &llvm_config);
+    let llvm::LlvmResult { host_llvm_config, .. } = builder.ensure(llvm::Llvm { target });
+    cargo.env("LLVM_CONFIG", &host_llvm_config);
 
     // Some LLVM linker flags (-L and -l) may be needed to link `rustc_llvm`. Its build script
     // expects these to be passed via the `LLVM_LINKER_FLAGS` env variable, separated by
@@ -1482,30 +1459,50 @@ fn rustc_llvm_env(builder: &Builder<'_>, cargo: &mut Cargo, target: TargetSelect
     }
 }
 
-/// `RustcLink` copies all of the rlibs from the rustc build into the previous stage's sysroot.
+/// `RustcLink` copies compiler rlibs from a rustc build into a compiler sysroot.
+/// It works with (potentially up to) three compilers:
+/// - `build_compiler` is a compiler that built rustc rlibs
+/// - `sysroot_compiler` is a compiler into whose sysroot we will copy the rlibs
+///   - In most situations, `build_compiler` == `sysroot_compiler`
+/// - `target_compiler` is the compiler whose rlibs were built. It is not represented explicitly
+///   in this step, rather we just read the rlibs from a rustc build stamp of `build_compiler`.
+///
 /// This is necessary for tools using `rustc_private`, where the previous compiler will build
 /// a tool against the next compiler.
 /// To build a tool against a compiler, the rlibs of that compiler that it links against
 /// must be in the sysroot of the compiler that's doing the compiling.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct RustcLink {
-    /// The compiler whose rlibs we are copying around.
-    pub compiler: Compiler,
-    /// This is the compiler into whose sysroot we want to copy the rlibs into.
-    pub previous_stage_compiler: Compiler,
-    pub target: TargetSelection,
+    /// This compiler **built** some rustc, whose rlibs we will copy into a sysroot.
+    build_compiler: Compiler,
+    /// This is the compiler into whose sysroot we want to copy the built rlibs.
+    /// In most cases, it will correspond to `build_compiler`.
+    sysroot_compiler: Compiler,
+    target: TargetSelection,
     /// Not actually used; only present to make sure the cache invalidation is correct.
     crates: Vec<String>,
 }
 
 impl RustcLink {
-    fn from_rustc(rustc: Rustc, host_compiler: Compiler) -> Self {
+    /// Copy rlibs from the build compiler that build this `rustc` into the sysroot of that
+    /// build compiler.
+    fn from_rustc(rustc: Rustc) -> Self {
         Self {
-            compiler: host_compiler,
-            previous_stage_compiler: rustc.build_compiler,
+            build_compiler: rustc.build_compiler,
+            sysroot_compiler: rustc.build_compiler,
             target: rustc.target,
             crates: rustc.crates,
         }
+    }
+
+    /// Copy rlibs **built** by `build_compiler` into the sysroot of `sysroot_compiler`.
+    fn from_build_compiler_and_sysroot(
+        build_compiler: Compiler,
+        sysroot_compiler: Compiler,
+        target: TargetSelection,
+        crates: Vec<String>,
+    ) -> Self {
+        Self { build_compiler, sysroot_compiler, target, crates }
     }
 }
 
@@ -1517,30 +1514,25 @@ impl Step for RustcLink {
     }
 
     /// Same as `std_link`, only for librustc
-    #[cfg_attr(
-        feature = "tracing",
-        instrument(
-            level = "trace",
-            name = "RustcLink::run",
-            skip_all,
-            fields(
-                compiler = ?self.compiler,
-                previous_stage_compiler = ?self.previous_stage_compiler,
-                target = ?self.target,
-            ),
-        ),
-    )]
     fn run(self, builder: &Builder<'_>) {
-        let compiler = self.compiler;
-        let previous_stage_compiler = self.previous_stage_compiler;
+        let build_compiler = self.build_compiler;
+        let sysroot_compiler = self.sysroot_compiler;
         let target = self.target;
         add_to_sysroot(
             builder,
-            &builder.sysroot_target_libdir(previous_stage_compiler, target),
-            &builder.sysroot_target_libdir(previous_stage_compiler, compiler.host),
-            &build_stamp::librustc_stamp(builder, compiler, target),
+            &builder.sysroot_target_libdir(sysroot_compiler, target),
+            &builder.sysroot_target_libdir(sysroot_compiler, sysroot_compiler.host),
+            &build_stamp::librustc_stamp(builder, build_compiler, target),
         );
     }
+}
+
+/// Output of the `compile::GccCodegenBackend` step.
+/// It includes the path to the libgccjit library on which this backend depends.
+#[derive(Clone)]
+pub struct GccCodegenBackendOutput {
+    stamp: BuildStamp,
+    gcc: GccOutput,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1549,8 +1541,9 @@ pub struct GccCodegenBackend {
 }
 
 impl Step for GccCodegenBackend {
-    type Output = BuildStamp;
-    const ONLY_HOSTS: bool = true;
+    type Output = GccCodegenBackendOutput;
+
+    const IS_HOST: bool = true;
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
         run.alias("rustc_codegen_gcc").alias("cg_gcc")
@@ -1562,17 +1555,6 @@ impl Step for GccCodegenBackend {
         });
     }
 
-    #[cfg_attr(
-        feature = "tracing",
-        instrument(
-            level = "debug",
-            name = "GccCodegenBackend::run",
-            skip_all,
-            fields(
-                compilers = ?self.compilers,
-            ),
-        ),
-    )]
     fn run(self, builder: &Builder<'_>) -> Self::Output {
         let target = self.compilers.target();
         let build_compiler = self.compilers.build_compiler();
@@ -1584,6 +1566,8 @@ impl Step for GccCodegenBackend {
             &CodegenBackendKind::Gcc,
         );
 
+        let gcc = builder.ensure(Gcc { target });
+
         if builder.config.keep_stage.contains(&build_compiler.stage) {
             trace!("`keep-stage` requested");
             builder.info(
@@ -1592,7 +1576,7 @@ impl Step for GccCodegenBackend {
             );
             // Codegen backends are linked separately from this step today, so we don't do
             // anything here.
-            return stamp;
+            return GccCodegenBackendOutput { stamp, gcc };
         }
 
         let mut cargo = builder::Cargo::new(
@@ -1606,13 +1590,16 @@ impl Step for GccCodegenBackend {
         cargo.arg("--manifest-path").arg(builder.src.join("compiler/rustc_codegen_gcc/Cargo.toml"));
         rustc_cargo_env(builder, &mut cargo, target);
 
-        let gcc = builder.ensure(Gcc { target });
         add_cg_gcc_cargo_flags(&mut cargo, &gcc);
 
         let _guard =
             builder.msg(Kind::Build, "codegen backend gcc", Mode::Codegen, build_compiler, target);
         let files = run_cargo(builder, cargo, vec![], &stamp, vec![], false, false);
-        write_codegen_backend_stamp(stamp, files, builder.config.dry_run())
+
+        GccCodegenBackendOutput {
+            stamp: write_codegen_backend_stamp(stamp, files, builder.config.dry_run()),
+            gcc,
+        }
     }
 
     fn metadata(&self) -> Option<StepMetadata> {
@@ -1630,7 +1617,7 @@ pub struct CraneliftCodegenBackend {
 
 impl Step for CraneliftCodegenBackend {
     type Output = BuildStamp;
-    const ONLY_HOSTS: bool = true;
+    const IS_HOST: bool = true;
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
         run.alias("rustc_codegen_cranelift").alias("cg_clif")
@@ -1642,17 +1629,6 @@ impl Step for CraneliftCodegenBackend {
         });
     }
 
-    #[cfg_attr(
-        feature = "tracing",
-        instrument(
-            level = "debug",
-            name = "CraneliftCodegenBackend::run",
-            skip_all,
-            fields(
-                compilers = ?self.compilers,
-            ),
-        ),
-    )]
     fn run(self, builder: &Builder<'_>) -> Self::Output {
         let target = self.compilers.target();
         let build_compiler = self.compilers.build_compiler();
@@ -1827,15 +1803,6 @@ impl Step for Sysroot {
     /// Returns the sysroot that `compiler` is supposed to use.
     /// For the stage0 compiler, this is stage0-sysroot (because of the initial std build).
     /// For all other stages, it's the same stage directory that the compiler lives in.
-    #[cfg_attr(
-        feature = "tracing",
-        instrument(
-            level = "debug",
-            name = "Sysroot::run",
-            skip_all,
-            fields(compiler = ?self.compiler),
-        ),
-    )]
     fn run(self, builder: &Builder<'_>) -> PathBuf {
         let compiler = self.compiler;
         let host_dir = builder.out.join(compiler.host);
@@ -1983,18 +1950,24 @@ impl Step for Sysroot {
     }
 }
 
-#[derive(Debug, PartialOrd, Ord, Clone, PartialEq, Eq, Hash)]
+/// Prepare a compiler sysroot.
+///
+/// The sysroot may contain various things useful for running the compiler, like linkers and
+/// linker wrappers (LLD, LLVM bitcode linker, etc.).
+///
+/// This will assemble a compiler in `build/$target/stage$stage`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Assemble {
     /// The compiler which we will produce in this step. Assemble itself will
     /// take care of ensuring that the necessary prerequisites to do so exist,
-    /// that is, this target can be a stage2 compiler and Assemble will build
-    /// previous stages for you.
+    /// that is, this can be e.g. a stage2 compiler and Assemble will build
+    /// the previous stages for you.
     pub target_compiler: Compiler,
 }
 
 impl Step for Assemble {
     type Output = Compiler;
-    const ONLY_HOSTS: bool = true;
+    const IS_HOST: bool = true;
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
         run.path("compiler/rustc").path("compiler")
@@ -2006,20 +1979,6 @@ impl Step for Assemble {
         });
     }
 
-    /// Prepare a new compiler from the artifacts in `stage`
-    ///
-    /// This will assemble a compiler in `build/$host/stage$stage`. The compiler
-    /// must have been previously produced by the `stage - 1` builder.build
-    /// compiler.
-    #[cfg_attr(
-        feature = "tracing",
-        instrument(
-            level = "debug",
-            name = "Assemble::run",
-            skip_all,
-            fields(target_compiler = ?self.target_compiler),
-        ),
-    )]
     fn run(self, builder: &Builder<'_>) -> Compiler {
         let target_compiler = self.target_compiler;
 
@@ -2042,14 +2001,52 @@ impl Step for Assemble {
         if builder.config.llvm_enabled(target_compiler.host) {
             trace!("target_compiler.host" = ?target_compiler.host, "LLVM enabled");
 
-            let llvm::LlvmResult { llvm_config, .. } =
-                builder.ensure(llvm::Llvm { target: target_compiler.host });
+            let target = target_compiler.host;
+            let llvm::LlvmResult { host_llvm_config, .. } = builder.ensure(llvm::Llvm { target });
             if !builder.config.dry_run() && builder.config.llvm_tools_enabled {
                 trace!("LLVM tools enabled");
 
-                let llvm_bin_dir =
-                    command(llvm_config).arg("--bindir").run_capture_stdout(builder).stdout();
-                let llvm_bin_dir = Path::new(llvm_bin_dir.trim());
+                let host_llvm_bin_dir = command(&host_llvm_config)
+                    .arg("--bindir")
+                    .run_capture_stdout(builder)
+                    .stdout()
+                    .trim()
+                    .to_string();
+
+                let llvm_bin_dir = if target == builder.host_target {
+                    PathBuf::from(host_llvm_bin_dir)
+                } else {
+                    // If we're cross-compiling, we cannot run the target llvm-config in order to
+                    // figure out where binaries are located. We thus have to guess.
+                    let external_llvm_config = builder
+                        .config
+                        .target_config
+                        .get(&target)
+                        .and_then(|t| t.llvm_config.clone());
+                    if let Some(external_llvm_config) = external_llvm_config {
+                        // If we have an external LLVM, just hope that the bindir is the directory
+                        // where the LLVM config is located
+                        external_llvm_config.parent().unwrap().to_path_buf()
+                    } else {
+                        // If we have built LLVM locally, then take the path of the host bindir
+                        // relative to its output build directory, and then apply it to the target
+                        // LLVM output build directory.
+                        let host_llvm_out = builder.llvm_out(builder.host_target);
+                        let target_llvm_out = builder.llvm_out(target);
+                        if let Ok(relative_path) =
+                            Path::new(&host_llvm_bin_dir).strip_prefix(host_llvm_out)
+                        {
+                            target_llvm_out.join(relative_path)
+                        } else {
+                            // This is the most desperate option, just replace the host target with
+                            // the actual target in the directory path...
+                            PathBuf::from(
+                                host_llvm_bin_dir
+                                    .replace(&*builder.host_target.triple, &target.triple),
+                            )
+                        }
+                    }
+                };
 
                 // Since we've already built the LLVM tools, install them to the sysroot.
                 // This is the equivalent of installing the `llvm-tools-preview` component via
@@ -2148,7 +2145,7 @@ impl Step for Assemble {
             target_compiler.stage - 1,
             builder.config.host_target,
         );
-        let mut build_compiler =
+        let build_compiler =
             builder.compiler(target_compiler.stage - 1, builder.config.host_target);
 
         // Build enzyme
@@ -2172,71 +2169,16 @@ impl Step for Assemble {
         }
 
         // Build the libraries for this compiler to link to (i.e., the libraries
-        // it uses at runtime). NOTE: Crates the target compiler compiles don't
-        // link to these. (FIXME: Is that correct? It seems to be correct most
-        // of the time but I think we do link to these for stage2/bin compilers
-        // when not performing a full bootstrap).
+        // it uses at runtime).
         debug!(
             ?build_compiler,
             "target_compiler.host" = ?target_compiler.host,
             "building compiler libraries to link to"
         );
-        let actual_stage = builder.ensure(Rustc::new(build_compiler, target_compiler.host));
-        // Current build_compiler.stage might be uplifted instead of being built; so update it
-        // to not fail while linking the artifacts.
-        debug!(
-            "(old) build_compiler.stage" = build_compiler.stage,
-            "(adjusted) build_compiler.stage" = actual_stage,
-            "temporarily adjusting `build_compiler.stage` to account for uplifted libraries"
-        );
-        build_compiler.stage = actual_stage;
 
-        let mut codegen_backend_stamps = vec![];
-        {
-            #[cfg(feature = "tracing")]
-            let _codegen_backend_span =
-                span!(tracing::Level::DEBUG, "building requested codegen backends").entered();
-
-            for backend in builder.config.enabled_codegen_backends(target_compiler.host) {
-                // FIXME: this is a horrible hack used to make `x check` work when other codegen
-                // backends are enabled.
-                // `x check` will check stage 1 rustc, which copies its rmetas to the stage0 sysroot.
-                // Then it checks codegen backends, which correctly use these rmetas.
-                // Then it needs to check std, but for that it needs to build stage 1 rustc.
-                // This copies the build rmetas into the stage0 sysroot, effectively poisoning it,
-                // because we then have both check and build rmetas in the same sysroot.
-                // That would be fine on its own. However, when another codegen backend is enabled,
-                // then building stage 1 rustc implies also building stage 1 codegen backend (even if
-                // it isn't used for anything). And since that tries to use the poisoned
-                // rmetas, it fails to build.
-                // We don't actually need to build rustc-private codegen backends for checking std,
-                // so instead we skip that.
-                // Note: this would be also an issue for other rustc-private tools, but that is "solved"
-                // by check::Std being last in the list of checked things (see
-                // `Builder::get_step_descriptions`).
-                if builder.kind == Kind::Check && builder.top_stage == 1 {
-                    continue;
-                }
-
-                let prepare_compilers = || {
-                    RustcPrivateCompilers::from_build_and_target_compiler(
-                        build_compiler,
-                        target_compiler,
-                    )
-                };
-
-                let stamp = match backend {
-                    CodegenBackendKind::Cranelift => {
-                        builder.ensure(CraneliftCodegenBackend { compilers: prepare_compilers() })
-                    }
-                    CodegenBackendKind::Gcc => {
-                        builder.ensure(GccCodegenBackend { compilers: prepare_compilers() })
-                    }
-                    CodegenBackendKind::Llvm | CodegenBackendKind::Custom(_) => continue,
-                };
-                codegen_backend_stamps.push(stamp);
-            }
-        }
+        // It is possible that an uplift has happened, so we override build_compiler here.
+        let BuiltRustc { build_compiler } =
+            builder.ensure(Rustc::new(build_compiler, target_compiler.host));
 
         let stage = target_compiler.stage;
         let host = target_compiler.host;
@@ -2296,9 +2238,56 @@ impl Step for Assemble {
             }
         }
 
-        debug!("copying codegen backends to sysroot");
-        for stamp in codegen_backend_stamps {
-            copy_codegen_backends_to_sysroot(builder, stamp, target_compiler);
+        {
+            #[cfg(feature = "tracing")]
+            let _codegen_backend_span =
+                span!(tracing::Level::DEBUG, "building requested codegen backends").entered();
+
+            for backend in builder.config.enabled_codegen_backends(target_compiler.host) {
+                // FIXME: this is a horrible hack used to make `x check` work when other codegen
+                // backends are enabled.
+                // `x check` will check stage 1 rustc, which copies its rmetas to the stage0 sysroot.
+                // Then it checks codegen backends, which correctly use these rmetas.
+                // Then it needs to check std, but for that it needs to build stage 1 rustc.
+                // This copies the build rmetas into the stage0 sysroot, effectively poisoning it,
+                // because we then have both check and build rmetas in the same sysroot.
+                // That would be fine on its own. However, when another codegen backend is enabled,
+                // then building stage 1 rustc implies also building stage 1 codegen backend (even if
+                // it isn't used for anything). And since that tries to use the poisoned
+                // rmetas, it fails to build.
+                // We don't actually need to build rustc-private codegen backends for checking std,
+                // so instead we skip that.
+                // Note: this would be also an issue for other rustc-private tools, but that is "solved"
+                // by check::Std being last in the list of checked things (see
+                // `Builder::get_step_descriptions`).
+                if builder.kind == Kind::Check && builder.top_stage == 1 {
+                    continue;
+                }
+
+                let prepare_compilers = || {
+                    RustcPrivateCompilers::from_build_and_target_compiler(
+                        build_compiler,
+                        target_compiler,
+                    )
+                };
+
+                match backend {
+                    CodegenBackendKind::Cranelift => {
+                        let stamp = builder
+                            .ensure(CraneliftCodegenBackend { compilers: prepare_compilers() });
+                        copy_codegen_backends_to_sysroot(builder, stamp, target_compiler);
+                    }
+                    CodegenBackendKind::Gcc => {
+                        let output =
+                            builder.ensure(GccCodegenBackend { compilers: prepare_compilers() });
+                        copy_codegen_backends_to_sysroot(builder, output.stamp, target_compiler);
+                        // Also copy libgccjit to the library sysroot, so that it is available for
+                        // the codegen backend.
+                        output.gcc.install_to(builder, &rustc_libdir);
+                    }
+                    CodegenBackendKind::Llvm | CodegenBackendKind::Custom(_) => continue,
+                }
+            }
         }
 
         if builder.config.lld_enabled {
@@ -2376,6 +2365,7 @@ impl Step for Assemble {
 ///
 /// For a particular stage this will link the file listed in `stamp` into the
 /// `sysroot_dst` provided.
+#[track_caller]
 pub fn add_to_sysroot(
     builder: &Builder<'_>,
     sysroot_dst: &Path,
@@ -2577,9 +2567,6 @@ pub fn stream_cargo(
 ) -> bool {
     let mut cmd = cargo.into_cmd();
 
-    #[cfg(feature = "tracing")]
-    let _run_span = crate::trace_cmd!(cmd);
-
     // Instruct Cargo to give us json messages on stdout, critically leaving
     // stderr as piped so we can get those pretty colors.
     let mut message_format = if builder.config.json_output {
@@ -2661,7 +2648,17 @@ pub fn strip_debug(builder: &Builder<'_>, target: TargetSelection, path: &Path) 
     }
 
     let previous_mtime = t!(t!(path.metadata()).modified());
-    command("strip").arg("--strip-debug").arg(path).run_capture(builder);
+    let stamp = BuildStamp::new(path.parent().unwrap())
+        .with_prefix(path.file_name().unwrap().to_str().unwrap())
+        .with_prefix("strip")
+        .add_stamp(previous_mtime.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos());
+
+    // Running strip can be relatively expensive (~1s on librustc_driver.so), so we don't rerun it
+    // if the file is unchanged.
+    if !stamp.is_up_to_date() {
+        command("strip").arg("--strip-debug").arg(path).run_capture(builder);
+    }
+    t!(stamp.write());
 
     let file = t!(fs::File::open(path));
 

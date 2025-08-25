@@ -17,12 +17,12 @@ use crate::core::config::flags::get_completion;
 use crate::utils::exec::command;
 use crate::{Mode, t};
 
-#[derive(Debug, PartialOrd, Ord, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct BuildManifest;
 
 impl Step for BuildManifest {
     type Output = ();
-    const ONLY_HOSTS: bool = true;
+    const IS_HOST: bool = true;
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
         run.path("src/tools/build-manifest")
@@ -56,12 +56,12 @@ impl Step for BuildManifest {
     }
 }
 
-#[derive(Debug, PartialOrd, Ord, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct BumpStage0;
 
 impl Step for BumpStage0 {
     type Output = ();
-    const ONLY_HOSTS: bool = true;
+    const IS_HOST: bool = true;
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
         run.path("src/tools/bump-stage0")
@@ -78,12 +78,12 @@ impl Step for BumpStage0 {
     }
 }
 
-#[derive(Debug, PartialOrd, Ord, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct ReplaceVersionPlaceholder;
 
 impl Step for ReplaceVersionPlaceholder {
     type Output = ();
-    const ONLY_HOSTS: bool = true;
+    const IS_HOST: bool = true;
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
         run.path("src/tools/replace-version-placeholder")
@@ -107,7 +107,6 @@ pub struct Miri {
 
 impl Step for Miri {
     type Output = ();
-    const ONLY_HOSTS: bool = false;
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
         run.path("src/tools/miri")
@@ -170,12 +169,12 @@ impl Step for Miri {
     }
 }
 
-#[derive(Debug, PartialOrd, Ord, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct CollectLicenseMetadata;
 
 impl Step for CollectLicenseMetadata {
     type Output = PathBuf;
-    const ONLY_HOSTS: bool = true;
+    const IS_HOST: bool = true;
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
         run.path("src/tools/collect-license-metadata")
@@ -201,12 +200,12 @@ impl Step for CollectLicenseMetadata {
     }
 }
 
-#[derive(Debug, PartialOrd, Ord, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct GenerateCopyright;
 
 impl Step for GenerateCopyright {
     type Output = Vec<PathBuf>;
-    const ONLY_HOSTS: bool = true;
+    const IS_HOST: bool = true;
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
         run.path("src/tools/generate-copyright")
@@ -265,12 +264,12 @@ impl Step for GenerateCopyright {
     }
 }
 
-#[derive(Debug, PartialOrd, Ord, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct GenerateWindowsSys;
 
 impl Step for GenerateWindowsSys {
     type Output = ();
-    const ONLY_HOSTS: bool = true;
+    const IS_HOST: bool = true;
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
         run.path("src/tools/generate-windows-sys")
@@ -327,12 +326,12 @@ impl Step for GenerateCompletions {
     }
 }
 
-#[derive(Debug, PartialOrd, Ord, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct UnicodeTableGenerator;
 
 impl Step for UnicodeTableGenerator {
     type Output = ();
-    const ONLY_HOSTS: bool = true;
+    const IS_HOST: bool = true;
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
         run.path("src/tools/unicode-table-generator")
@@ -349,12 +348,12 @@ impl Step for UnicodeTableGenerator {
     }
 }
 
-#[derive(Debug, PartialOrd, Ord, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct FeaturesStatusDump;
 
 impl Step for FeaturesStatusDump {
     type Output = ();
-    const ONLY_HOSTS: bool = true;
+    const IS_HOST: bool = true;
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
         run.path("src/tools/features-status-dump")
@@ -409,14 +408,14 @@ impl Step for CyclicStep {
 ///
 /// The coverage-dump tool is an internal detail of coverage tests, so this run
 /// step is only needed when testing coverage-dump manually.
-#[derive(Debug, PartialOrd, Ord, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct CoverageDump;
 
 impl Step for CoverageDump {
     type Output = ();
 
     const DEFAULT: bool = false;
-    const ONLY_HOSTS: bool = true;
+    const IS_HOST: bool = true;
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
         run.path("src/tools/coverage-dump")
@@ -438,7 +437,7 @@ pub struct Rustfmt;
 
 impl Step for Rustfmt {
     type Output = ();
-    const ONLY_HOSTS: bool = true;
+    const IS_HOST: bool = true;
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
         run.path("src/tools/rustfmt")

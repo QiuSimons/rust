@@ -537,7 +537,7 @@ impl<T> Trait<T> for X {
                 }
             }
             TypeError::TargetFeatureCast(def_id) => {
-                let target_spans = find_attr!(tcx.get_all_attrs(def_id), AttributeKind::TargetFeature(.., span) => *span);
+                let target_spans = find_attr!(tcx.get_all_attrs(def_id), AttributeKind::TargetFeature{attr_span: span, was_forced: false, ..} => *span);
                 diag.note(
                     "functions with `#[target_feature]` can only be coerced to `unsafe` function pointers"
                 );
@@ -946,7 +946,7 @@ fn foo(&self) -> Self::T { String::new() }
 
     pub fn format_generic_args(&self, args: &[ty::GenericArg<'tcx>]) -> String {
         FmtPrinter::print_string(self.tcx, hir::def::Namespace::TypeNS, |p| {
-            p.path_generic_args(|_| Ok(()), args)
+            p.print_path_with_generic_args(|_| Ok(()), args)
         })
         .expect("could not write to `String`.")
     }

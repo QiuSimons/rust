@@ -1,4 +1,5 @@
 // ignore-tidy-filelength
+use std::borrow::Cow;
 use std::fmt;
 
 use rustc_abi::ExternAbi;
@@ -17,10 +18,10 @@ pub use rustc_ast::{
 use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::sorted_map::SortedMap;
 use rustc_data_structures::tagged_ptr::TaggedRef;
+use rustc_error_messages::{DiagArgValue, IntoDiagArg};
 use rustc_index::IndexVec;
 use rustc_macros::{Decodable, Encodable, HashStable_Generic};
 use rustc_span::def_id::LocalDefId;
-use rustc_span::hygiene::MacroKind;
 use rustc_span::source_map::Spanned;
 use rustc_span::{BytePos, DUMMY_SP, ErrorGuaranteed, Ident, Span, Symbol, kw, sym};
 use rustc_target::asm::InlineAsmRegOrRegClass;
@@ -30,7 +31,7 @@ use tracing::debug;
 
 use crate::LangItem;
 use crate::attrs::AttributeKind;
-use crate::def::{CtorKind, DefKind, PerNS, Res};
+use crate::def::{CtorKind, DefKind, MacroKinds, PerNS, Res};
 use crate::def_id::{DefId, LocalDefIdMap};
 pub(crate) use crate::hir_id::{HirId, ItemLocalId, ItemLocalMap, OwnerId};
 use crate::intravisit::{FnKind, VisitorExt};
@@ -1160,6 +1161,12 @@ pub struct AttrPath {
     pub span: Span,
 }
 
+impl IntoDiagArg for AttrPath {
+    fn into_diag_arg(self, path: &mut Option<std::path::PathBuf>) -> DiagArgValue {
+        self.to_string().into_diag_arg(path)
+    }
+}
+
 impl AttrPath {
     pub fn from_ast(path: &ast::Path) -> Self {
         AttrPath {
@@ -1233,6 +1240,13 @@ impl Attribute {
             _ => None,
         }
     }
+
+    pub fn is_parsed_attr(&self) -> bool {
+        match self {
+            Attribute::Parsed(_) => true,
+            Attribute::Unparsed(_) => false,
+        }
+    }
 }
 
 impl AttributeExt for Attribute {
@@ -1303,14 +1317,10 @@ impl AttributeExt for Attribute {
         match &self {
             Attribute::Unparsed(u) => u.span,
             // FIXME: should not be needed anymore when all attrs are parsed
-            Attribute::Parsed(AttributeKind::Deprecation { span, .. }) => *span,
             Attribute::Parsed(AttributeKind::DocComment { span, .. }) => *span,
-            Attribute::Parsed(AttributeKind::MacroUse { span, .. }) => *span,
-            Attribute::Parsed(AttributeKind::MayDangle(span)) => *span,
-            Attribute::Parsed(AttributeKind::Ignore { span, .. }) => *span,
-            Attribute::Parsed(AttributeKind::ShouldPanic { span, .. }) => *span,
-            Attribute::Parsed(AttributeKind::AutomaticallyDerived(span)) => *span,
+            Attribute::Parsed(AttributeKind::Deprecation { span, .. }) => *span,
             Attribute::Parsed(AttributeKind::AllowInternalUnsafe(span)) => *span,
+            Attribute::Parsed(AttributeKind::Linkage(_, span)) => *span,
             a => panic!("can't get the span of an arbitrary parsed attribute: {a:?}"),
         }
     }
@@ -2257,8 +2267,15 @@ impl fmt::Display for ConstContext {
     }
 }
 
-// NOTE: `IntoDiagArg` impl for `ConstContext` lives in `rustc_errors`
-// due to a cyclical dependency between hir and that crate.
+impl IntoDiagArg for ConstContext {
+    fn into_diag_arg(self, _: &mut Option<std::path::PathBuf>) -> DiagArgValue {
+        DiagArgValue::Str(Cow::Borrowed(match self {
+            ConstContext::ConstFn => "const_fn",
+            ConstContext::Static(_) => "static",
+            ConstContext::Const { .. } => "const",
+        }))
+    }
+}
 
 /// A literal.
 pub type Lit = Spanned<LitKind>;
@@ -4157,7 +4174,7 @@ impl<'hir> Item<'hir> {
         expect_fn, (Ident, &FnSig<'hir>, &'hir Generics<'hir>, BodyId),
             ItemKind::Fn { ident, sig, generics, body, .. }, (*ident, sig, generics, *body);
 
-        expect_macro, (Ident, &ast::MacroDef, MacroKind),
+        expect_macro, (Ident, &ast::MacroDef, MacroKinds),
             ItemKind::Macro(ident, def, mk), (*ident, def, *mk);
 
         expect_mod, (Ident, &'hir Mod<'hir>), ItemKind::Mod(ident, m), (*ident, m);
@@ -4336,7 +4353,7 @@ pub enum ItemKind<'hir> {
         has_body: bool,
     },
     /// A MBE macro definition (`macro_rules!` or `macro`).
-    Macro(Ident, &'hir ast::MacroDef, MacroKind),
+    Macro(Ident, &'hir ast::MacroDef, MacroKinds),
     /// A module.
     Mod(Ident, &'hir Mod<'hir>),
     /// An external module, e.g. `extern { .. }`.

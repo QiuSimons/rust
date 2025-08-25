@@ -8,7 +8,7 @@ use rustc_type_ir::fast_reject::DeepRejectCtxt;
 use rustc_type_ir::inherent::*;
 use rustc_type_ir::relate::Relate;
 use rustc_type_ir::relate::solver_relating::RelateExt;
-use rustc_type_ir::search_graph::PathKind;
+use rustc_type_ir::search_graph::{CandidateHeadUsages, PathKind};
 use rustc_type_ir::{
     self as ty, CanonicalVarValues, InferCtxtLike, Interner, TypeFoldable, TypeFolder,
     TypeSuperFoldable, TypeSuperVisitable, TypeVisitable, TypeVisitableExt, TypeVisitor,
@@ -399,6 +399,10 @@ where
         result
     }
 
+    pub(super) fn ignore_candidate_head_usages(&mut self, usages: CandidateHeadUsages) {
+        self.search_graph.ignore_candidate_head_usages(usages);
+    }
+
     /// Recursively evaluates `goal`, returning whether any inference vars have
     /// been constrained and the certainty of the result.
     fn evaluate_goal(
@@ -455,10 +459,7 @@ where
         let opaque_types = self.delegate.clone_opaque_types_lookup_table();
         let (goal, opaque_types) = eager_resolve_vars(self.delegate, (goal, opaque_types));
 
-        let is_hir_typeck_root_goal = matches!(goal_evaluation_kind, GoalEvaluationKind::Root)
-            && self.delegate.in_hir_typeck();
-        let (orig_values, canonical_goal) =
-            self.canonicalize_goal(is_hir_typeck_root_goal, goal, opaque_types);
+        let (orig_values, canonical_goal) = self.canonicalize_goal(goal, opaque_types);
         let mut goal_evaluation =
             self.inspect.new_goal_evaluation(goal, &orig_values, goal_evaluation_kind);
         let canonical_result = self.search_graph.evaluate_goal(

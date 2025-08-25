@@ -325,8 +325,7 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
         let _trace = enter_trace_span!(
             M,
             "instantiate_from_frame_and_normalize_erasing_regions",
-            "{}",
-            frame.instance
+            %frame.instance
         );
         frame
             .instance
@@ -344,6 +343,7 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
         def: DefId,
         args: GenericArgsRef<'tcx>,
     ) -> InterpResult<'tcx, ty::Instance<'tcx>> {
+        let _trace = enter_trace_span!(M, resolve::try_resolve, def = ?def);
         trace!("resolve: {:?}, {:#?}", def, args);
         trace!("typing_env: {:#?}", self.typing_env);
         trace!("args: {:#?}", args);
@@ -582,6 +582,7 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
         span: Span,
         layout: Option<TyAndLayout<'tcx>>,
     ) -> InterpResult<'tcx, OpTy<'tcx, M::Provenance>> {
+        let _trace = enter_trace_span!(M, const_eval::eval_mir_constant, ?val);
         let const_val = val.eval(*self.tcx, self.typing_env, span).map_err(|err| {
                 if M::ALL_CONSTS_ARE_PRECHECKED {
                     match err {

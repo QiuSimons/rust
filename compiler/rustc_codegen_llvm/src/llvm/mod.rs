@@ -3,7 +3,6 @@
 use std::ffi::{CStr, CString};
 use std::num::NonZero;
 use std::ptr;
-use std::str::FromStr;
 use std::string::FromUtf8Error;
 
 use libc::c_uint;
@@ -16,7 +15,6 @@ pub(crate) use self::MetadataType::*;
 pub(crate) use self::ffi::*;
 use crate::common::AsCCharPtr;
 
-pub(crate) mod archive_ro;
 pub(crate) mod diagnostic;
 pub(crate) mod enzyme_ffi;
 mod ffi;
@@ -39,32 +37,6 @@ pub(crate) fn AddFunctionAttributes<'ll>(
 ) {
     unsafe {
         LLVMRustAddFunctionAttributes(llfn, idx.as_uint(), attrs.as_ptr(), attrs.len());
-    }
-}
-
-pub(crate) fn HasAttributeAtIndex<'ll>(
-    llfn: &'ll Value,
-    idx: AttributePlace,
-    kind: AttributeKind,
-) -> bool {
-    unsafe { LLVMRustHasAttributeAtIndex(llfn, idx.as_uint(), kind) }
-}
-
-pub(crate) fn HasStringAttribute<'ll>(llfn: &'ll Value, name: &str) -> bool {
-    unsafe { LLVMRustHasFnAttribute(llfn, name.as_c_char_ptr(), name.len()) }
-}
-
-pub(crate) fn RemoveStringAttrFromFn<'ll>(llfn: &'ll Value, name: &str) {
-    unsafe { LLVMRustRemoveFnAttribute(llfn, name.as_c_char_ptr(), name.len()) }
-}
-
-pub(crate) fn RemoveRustEnumAttributeAtIndex(
-    llfn: &Value,
-    place: AttributePlace,
-    kind: AttributeKind,
-) {
-    unsafe {
-        LLVMRustRemoveEnumAttributeAtIndex(llfn, place.as_uint(), kind);
     }
 }
 
@@ -178,21 +150,6 @@ pub(crate) enum CodeGenOptSize {
     CodeGenOptSizeAggressive = 2,
 }
 
-impl FromStr for ArchiveKind {
-    type Err = ();
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "gnu" => Ok(ArchiveKind::K_GNU),
-            "bsd" => Ok(ArchiveKind::K_BSD),
-            "darwin" => Ok(ArchiveKind::K_DARWIN),
-            "coff" => Ok(ArchiveKind::K_COFF),
-            "aix_big" => Ok(ArchiveKind::K_AIXBIG),
-            _ => Err(()),
-        }
-    }
-}
-
 pub(crate) fn SetInstructionCallConv(instr: &Value, cc: CallConv) {
     unsafe {
         LLVMSetInstructionCallConv(instr, cc as c_uint);
@@ -258,7 +215,7 @@ pub(crate) fn set_initializer(llglobal: &Value, constant_val: &Value) {
 }
 
 pub(crate) fn set_global_constant(llglobal: &Value, is_constant: bool) {
-    LLVMSetGlobalConstant(llglobal, if is_constant { ffi::True } else { ffi::False });
+    LLVMSetGlobalConstant(llglobal, is_constant.to_llvm_bool());
 }
 
 pub(crate) fn get_linkage(llglobal: &Value) -> Linkage {
@@ -272,7 +229,7 @@ pub(crate) fn set_linkage(llglobal: &Value, linkage: Linkage) {
 }
 
 pub(crate) fn is_declaration(llglobal: &Value) -> bool {
-    unsafe { LLVMIsDeclaration(llglobal) == ffi::True }
+    unsafe { LLVMIsDeclaration(llglobal) }.is_true()
 }
 
 pub(crate) fn get_visibility(llglobal: &Value) -> Visibility {

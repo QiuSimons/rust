@@ -37,14 +37,14 @@ use crate::core::builder;
 use crate::core::builder::Kind;
 use crate::core::config::{DryRun, LldMode, LlvmLibunwind, TargetSelection, flags};
 use crate::utils::exec::{BootstrapCommand, command};
-use crate::utils::helpers::{
-    self, dir_is_empty, exe, libdir, set_file_times, split_debuginfo, symlink_dir,
-};
+use crate::utils::helpers::{self, dir_is_empty, exe, libdir, set_file_times, split_debuginfo};
 
 mod core;
 mod utils;
 
 pub use core::builder::PathSet;
+#[cfg(feature = "tracing")]
+pub use core::builder::STEP_SPAN_TARGET;
 pub use core::config::flags::{Flags, Subcommand};
 pub use core::config::{ChangeId, Config};
 
@@ -53,7 +53,9 @@ use tracing::{instrument, span};
 pub use utils::change_tracker::{
     CONFIG_CHANGE_HISTORY, find_recent_config_change_ids, human_readable_changes,
 };
-pub use utils::helpers::PanicTracker;
+pub use utils::helpers::{PanicTracker, symlink_dir};
+#[cfg(feature = "tracing")]
+pub use utils::tracing::setup_tracing;
 
 use crate::core::build_steps::vendor::VENDOR_DIR;
 
@@ -160,6 +162,20 @@ impl CodegenBackendKind {
 
     pub fn is_gcc(&self) -> bool {
         matches!(self, Self::Gcc)
+    }
+}
+
+impl std::str::FromStr for CodegenBackendKind {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "" => Err("Invalid empty backend name"),
+            "gcc" => Ok(Self::Gcc),
+            "llvm" => Ok(Self::Llvm),
+            "cranelift" => Ok(Self::Cranelift),
+            _ => Ok(Self::Custom(s.to_string())),
+        }
     }
 }
 
@@ -277,7 +293,7 @@ pub enum DependencyType {
 ///
 /// These entries currently correspond to the various output directories of the
 /// build system, with each mod generating output in a different directory.
-#[derive(Debug, Hash, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Hash, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     /// Build the standard library, placing output in the "stageN-std" directory.
     Std,
@@ -355,7 +371,7 @@ pub enum RemapScheme {
     NonCompiler,
 }
 
-#[derive(Debug, Hash, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Hash, Clone, Copy, PartialEq, Eq)]
 pub enum CLang {
     C,
     Cxx,
@@ -1741,6 +1757,7 @@ impl Build {
     ///
     /// If `src` is a symlink, `src` will be resolved to the actual path
     /// and copied to `dst` instead of the symlink itself.
+    #[track_caller]
     pub fn resolve_symlink_and_copy(&self, src: &Path, dst: &Path) {
         self.copy_link_internal(src, dst, true);
     }
@@ -1749,6 +1766,7 @@ impl Build {
     /// Attempts to use hard links if possible, falling back to copying.
     /// You can neither rely on this being a copy nor it being a link,
     /// so do not write to dst.
+    #[track_caller]
     pub fn copy_link(&self, src: &Path, dst: &Path, file_type: FileType) {
         self.copy_link_internal(src, dst, false);
 
@@ -1763,6 +1781,7 @@ impl Build {
         }
     }
 
+    #[track_caller]
     fn copy_link_internal(&self, src: &Path, dst: &Path, dereference_symlinks: bool) {
         if self.config.dry_run() {
             return;
@@ -1771,6 +1790,10 @@ impl Build {
         if src == dst {
             return;
         }
+
+        #[cfg(feature = "tracing")]
+        let _span = trace_io!("file-copy-link", ?src, ?dst);
+
         if let Err(e) = fs::remove_file(dst)
             && cfg!(windows)
             && e.kind() != io::ErrorKind::NotFound
@@ -1813,6 +1836,7 @@ impl Build {
     /// Links the `src` directory recursively to `dst`. Both are assumed to exist
     /// when this function is called.
     /// Will attempt to use hard links if possible and fall back to copying.
+    #[track_caller]
     pub fn cp_link_r(&self, src: &Path, dst: &Path) {
         if self.config.dry_run() {
             return;
@@ -1835,12 +1859,14 @@ impl Build {
     /// Will attempt to use hard links if possible and fall back to copying.
     /// Unwanted files or directories can be skipped
     /// by returning `false` from the filter function.
+    #[track_caller]
     pub fn cp_link_filtered(&self, src: &Path, dst: &Path, filter: &dyn Fn(&Path) -> bool) {
         // Immediately recurse with an empty relative path
         self.cp_link_filtered_recurse(src, dst, Path::new(""), filter)
     }
 
     // Inner function does the actual work
+    #[track_caller]
     fn cp_link_filtered_recurse(
         &self,
         src: &Path,
@@ -1860,7 +1886,6 @@ impl Build {
                     self.create_dir(&dst);
                     self.cp_link_filtered_recurse(&path, &dst, &relative, filter);
                 } else {
-                    let _ = fs::remove_file(&dst);
                     self.copy_link(&path, &dst, FileType::Regular);
                 }
             }
@@ -1902,10 +1927,15 @@ impl Build {
         t!(fs::read_to_string(path))
     }
 
+    #[track_caller]
     fn create_dir(&self, dir: &Path) {
         if self.config.dry_run() {
             return;
         }
+
+        #[cfg(feature = "tracing")]
+        let _span = trace_io!("dir-create", ?dir);
+
         t!(fs::create_dir_all(dir))
     }
 
@@ -1913,6 +1943,10 @@ impl Build {
         if self.config.dry_run() {
             return;
         }
+
+        #[cfg(feature = "tracing")]
+        let _span = trace_io!("dir-remove", ?dir);
+
         t!(fs::remove_dir_all(dir))
     }
 
@@ -2005,13 +2039,13 @@ to download LLVM rather than building it.
         &self.config.exec_ctx
     }
 
-    pub fn report_summary(&self, start_time: Instant) {
-        self.config.exec_ctx.profiler().report_summary(start_time);
+    pub fn report_summary(&self, path: &Path, start_time: Instant) {
+        self.config.exec_ctx.profiler().report_summary(path, start_time);
     }
 
     #[cfg(feature = "tracing")]
-    pub fn report_step_graph(self) {
-        self.step_graph.into_inner().store_to_dot_files();
+    pub fn report_step_graph(self, directory: &Path) {
+        self.step_graph.into_inner().store_to_dot_files(directory);
     }
 }
 

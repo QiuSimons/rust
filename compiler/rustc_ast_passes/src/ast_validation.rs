@@ -25,16 +25,16 @@ use rustc_abi::{CanonAbi, ExternAbi, InterruptKind};
 use rustc_ast::visit::{AssocCtxt, BoundKind, FnCtxt, FnKind, Visitor, walk_list};
 use rustc_ast::*;
 use rustc_ast_pretty::pprust::{self, State};
+use rustc_attr_parsing::validate_attr;
 use rustc_data_structures::fx::FxIndexMap;
-use rustc_errors::DiagCtxtHandle;
+use rustc_errors::{DiagCtxtHandle, LintBuffer};
 use rustc_feature::Features;
-use rustc_parse::validate_attr;
 use rustc_session::Session;
+use rustc_session::lint::BuiltinLintDiag;
 use rustc_session::lint::builtin::{
     DEPRECATED_WHERE_CLAUSE_LOCATION, MISSING_ABI, MISSING_UNSAFE_ON_EXTERN,
     PATTERNS_IN_FNS_WITHOUT_BODY,
 };
-use rustc_session::lint::{BuiltinLintDiag, LintBuffer};
 use rustc_span::{Ident, Span, kw, sym};
 use rustc_target::spec::{AbiMap, AbiMapping};
 use thin_vec::thin_vec;
@@ -293,6 +293,21 @@ impl<'a> AstValidator<'a> {
         });
     }
 
+    fn check_async_fn_in_const_trait_or_impl(&self, sig: &FnSig, parent: &TraitOrTraitImpl) {
+        let Some(const_keyword) = parent.constness() else { return };
+
+        let Some(CoroutineKind::Async { span: async_keyword, .. }) = sig.header.coroutine_kind
+        else {
+            return;
+        };
+
+        self.dcx().emit_err(errors::AsyncFnInConstTraitOrTraitImpl {
+            async_keyword,
+            in_impl: matches!(parent, TraitOrTraitImpl::TraitImpl { .. }),
+            const_keyword,
+        });
+    }
+
     fn check_fn_decl(&self, fn_decl: &FnDecl, self_semantic: SelfSemantic) {
         self.check_decl_num_args(fn_decl);
         self.check_decl_cvariadic_pos(fn_decl);
@@ -390,7 +405,24 @@ impl<'a> AstValidator<'a> {
                         if let InterruptKind::X86 = interrupt_kind {
                             // "x86-interrupt" is special because it does have arguments.
                             // FIXME(workingjubilee): properly lint on acceptable input types.
-                            if let FnRetTy::Ty(ref ret_ty) = sig.decl.output {
+                            let inputs = &sig.decl.inputs;
+                            let param_count = inputs.len();
+                            if !matches!(param_count, 1 | 2) {
+                                let mut spans: Vec<Span> =
+                                    inputs.iter().map(|arg| arg.span).collect();
+                                if spans.is_empty() {
+                                    spans = vec![sig.span];
+                                }
+                                self.dcx().emit_err(errors::AbiX86Interrupt { spans, param_count });
+                            }
+
+                            if let FnRetTy::Ty(ref ret_ty) = sig.decl.output
+                                && match &ret_ty.kind {
+                                    TyKind::Never => false,
+                                    TyKind::Tup(tup) if tup.is_empty() => false,
+                                    _ => true,
+                                }
+                            {
                                 self.dcx().emit_err(errors::AbiMustNotHaveReturnType {
                                     span: ret_ty.span,
                                     abi,
@@ -449,7 +481,13 @@ impl<'a> AstValidator<'a> {
 
     fn reject_params_or_return(&self, abi: ExternAbi, ident: &Ident, sig: &FnSig) {
         let mut spans: Vec<_> = sig.decl.inputs.iter().map(|p| p.span).collect();
-        if let FnRetTy::Ty(ref ret_ty) = sig.decl.output {
+        if let FnRetTy::Ty(ref ret_ty) = sig.decl.output
+            && match &ret_ty.kind {
+                TyKind::Never => false,
+                TyKind::Tup(tup) if tup.is_empty() => false,
+                _ => true,
+            }
+        {
             spans.push(ret_ty.span);
         }
 
@@ -838,7 +876,7 @@ impl<'a> AstValidator<'a> {
                 MISSING_ABI,
                 id,
                 span,
-                BuiltinLintDiag::MissingAbi(span, ExternAbi::FALLBACK),
+                errors::MissingAbiSugg { span, default_abi: ExternAbi::FALLBACK },
             )
         }
     }
@@ -1142,7 +1180,7 @@ impl<'a> Visitor<'a> for AstValidator<'a> {
                     self.dcx().emit_err(errors::UnsafeItem { span, kind: "module" });
                 }
                 // Ensure that `path` attributes on modules are recorded as used (cf. issue #35584).
-                if !matches!(mod_kind, ModKind::Loaded(_, Inline::Yes, _, _))
+                if !matches!(mod_kind, ModKind::Loaded(_, Inline::Yes, _))
                     && !attr::contains_name(&item.attrs, sym::path)
                 {
                     self.check_mod_file_item_asciionly(*ident);
@@ -1566,6 +1604,7 @@ impl<'a> Visitor<'a> for AstValidator<'a> {
             self.visibility_not_permitted(&item.vis, errors::VisibilityNotPermittedNote::TraitImpl);
             if let AssocItemKind::Fn(box Fn { sig, .. }) = &item.kind {
                 self.check_trait_fn_not_const(sig.header.constness, parent);
+                self.check_async_fn_in_const_trait_or_impl(sig, parent);
             }
         }
 
@@ -1741,7 +1780,7 @@ fn deny_equality_constraints(
                         .map(|segment| segment.ident.name)
                         .zip(poly.trait_ref.path.segments.iter().map(|segment| segment.ident.name))
                         .all(|(a, b)| a == b)
-                        && let Some(potential_assoc) = full_path.segments.iter().last()
+                        && let Some(potential_assoc) = full_path.segments.last()
                     {
                         suggest(poly, potential_assoc, predicate);
                     }
