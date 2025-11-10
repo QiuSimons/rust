@@ -5,6 +5,7 @@ use rustc_ast as ast;
 use rustc_ast::{InlineAsmOptions, InlineAsmTemplatePiece};
 use rustc_data_structures::packed::Pu128;
 use rustc_hir::lang_items::LangItem;
+use rustc_lint_defs::builtin::TAIL_CALL_TRACK_CALLER;
 use rustc_middle::mir::{self, AssertKind, InlineAsmMacro, SwitchTargets, UnwindTerminateReason};
 use rustc_middle::ty::layout::{HasTyCtxt, LayoutOf, ValidityRequirement};
 use rustc_middle::ty::print::{with_no_trimmed_paths, with_no_visible_paths};
@@ -35,7 +36,7 @@ enum MergingSucc {
     True,
 }
 
-/// Indicates to the call terminator codegen whether a cal
+/// Indicates to the call terminator codegen whether a call
 /// is a normal call or an explicit tail call.
 #[derive(Debug, PartialEq)]
 enum CallKind {
@@ -199,10 +200,11 @@ impl<'a, 'tcx> TerminatorCodegenHelper<'tcx> {
         let fn_ty = bx.fn_decl_backend_type(fn_abi);
 
         let fn_attrs = if bx.tcx().def_kind(fx.instance.def_id()).has_codegen_attrs() {
-            Some(bx.tcx().codegen_fn_attrs(fx.instance.def_id()))
+            Some(bx.tcx().codegen_instance_attrs(fx.instance.def))
         } else {
             None
         };
+        let fn_attrs = fn_attrs.as_deref();
 
         if !fn_abi.can_unwind {
             unwind = mir::UnwindAction::Unreachable;
@@ -518,6 +520,9 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             match self.locals[mir::Local::from_usize(1 + va_list_arg_idx)] {
                 LocalRef::Place(va_list) => {
                     bx.va_end(va_list.val.llval);
+
+                    // Explicitly end the lifetime of the `va_list`, improves LLVM codegen.
+                    bx.lifetime_end(va_list.val.llval, va_list.layout.size);
                 }
                 _ => bug!("C-variadic function must have a `VaList` place"),
             }
@@ -552,9 +557,11 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 let op = match self.locals[mir::RETURN_PLACE] {
                     LocalRef::Operand(op) => op,
                     LocalRef::PendingOperand => bug!("use of return before def"),
-                    LocalRef::Place(cg_place) => {
-                        OperandRef { val: Ref(cg_place.val), layout: cg_place.layout }
-                    }
+                    LocalRef::Place(cg_place) => OperandRef {
+                        val: Ref(cg_place.val),
+                        layout: cg_place.layout,
+                        move_annotation: None,
+                    },
                     LocalRef::UnsizedPlace(_) => bug!("return type must be sized"),
                 };
                 let llslot = match op.val {
@@ -610,7 +617,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         let (maybe_null, drop_fn, fn_abi, drop_instance) = match ty.kind() {
             // FIXME(eddyb) perhaps move some of this logic into
             // `Instance::resolve_drop_in_place`?
-            ty::Dynamic(_, _, ty::Dyn) => {
+            ty::Dynamic(_, _) => {
                 // IN THIS ARM, WE HAVE:
                 // ty = *mut (dyn Trait)
                 // which is: exists<T> ( *mut T,    Vtable<T: Trait> )
@@ -906,7 +913,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     fn_span,
                 );
 
-                let instance = match instance.def {
+                match instance.def {
                     // We don't need AsyncDropGlueCtorShim here because it is not `noop func`,
                     // it is `func returning noop future`
                     ty::InstanceKind::DropGlue(_, None) => {
@@ -995,14 +1002,35 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                                         intrinsic.name,
                                     );
                                 }
-                                instance
+                                (Some(instance), None)
                             }
                         }
                     }
-                    _ => instance,
-                };
 
-                (Some(instance), None)
+                    _ if kind == CallKind::Tail
+                        && instance.def.requires_caller_location(bx.tcx()) =>
+                    {
+                        if let Some(hir_id) =
+                            terminator.source_info.scope.lint_root(&self.mir.source_scopes)
+                        {
+                            let msg = "tail calling a function marked with `#[track_caller]` has no special effect";
+                            bx.tcx().node_lint(TAIL_CALL_TRACK_CALLER, hir_id, |d| {
+                                _ = d.primary_message(msg).span(fn_span)
+                            });
+                        }
+
+                        let instance = ty::Instance::resolve_for_fn_ptr(
+                            bx.tcx(),
+                            bx.typing_env(),
+                            def_id,
+                            generic_args,
+                        )
+                        .unwrap();
+
+                        (None, Some(bx.get_fn_addr(instance)))
+                    }
+                    _ => (Some(instance), None),
+                }
             }
             ty::FnPtr(..) => (None, Some(callee.immediate())),
             _ => bug!("{} is not callable", callee.layout.ty),
@@ -1037,7 +1065,17 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 let return_dest = self.make_return_dest(bx, destination, &fn_abi.ret, &mut llargs);
                 target.map(|target| (return_dest, target))
             }
-            CallKind::Tail => None,
+            CallKind::Tail => {
+                if fn_abi.ret.is_indirect() {
+                    match self.make_return_dest(bx, destination, &fn_abi.ret, &mut llargs) {
+                        ReturnDest::Nothing => {}
+                        _ => bug!(
+                            "tail calls to functions with indirect returns cannot store into a destination"
+                        ),
+                    }
+                }
+                None
+            }
         };
 
         // Split the rust-call tupled arguments off.
@@ -1119,7 +1157,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 | (&mir::Operand::Constant(_), Ref(PlaceValue { llextra: None, .. })) => {
                     let tmp = PlaceRef::alloca(bx, op.layout);
                     bx.lifetime_start(tmp.val.llval, tmp.layout.size);
-                    op.val.store(bx, tmp);
+                    op.store_with_annotation(bx, tmp);
                     op.val = Ref(tmp.val);
                     lifetime_ends_after_call.push((tmp.val.llval, tmp.layout.size));
                 }
@@ -1295,6 +1333,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             for statement in &data.statements {
                 self.codegen_statement(bx, statement);
             }
+            self.codegen_stmt_debuginfos(bx, &data.after_last_stmt_debuginfos);
 
             let merging_succ = self.codegen_terminator(bx, bb, data.terminator());
             if let MergingSucc::False = merging_succ {
@@ -1526,13 +1565,13 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     };
                     let scratch = PlaceValue::alloca(bx, arg.layout.size, required_align);
                     bx.lifetime_start(scratch.llval, arg.layout.size);
-                    op.val.store(bx, scratch.with_type(arg.layout));
+                    op.store_with_annotation(bx, scratch.with_type(arg.layout));
                     lifetime_ends_after_call.push((scratch.llval, arg.layout.size));
                     (scratch.llval, scratch.align, true)
                 }
                 PassMode::Cast { .. } => {
                     let scratch = PlaceRef::alloca(bx, arg.layout);
-                    op.val.store(bx, scratch);
+                    op.store_with_annotation(bx, scratch);
                     (scratch.val.llval, scratch.val.align, true)
                 }
                 _ => (op.immediate_or_packed_pair(bx), arg.layout.align.abi, false),
@@ -1601,6 +1640,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     align,
                     bx.const_usize(copy_bytes),
                     MemFlags::empty(),
+                    None,
                 );
                 // ...and then load it with the ABI type.
                 llval = load_cast(bx, cast, llscratch, scratch_align);

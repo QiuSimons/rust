@@ -82,6 +82,10 @@ where
         extend_integer_width_mips(arg, 64);
         return;
     }
+    if arg.layout.pass_indirectly_in_non_rustic_abis(cx) {
+        arg.make_indirect();
+        return;
+    }
 
     let dl = cx.data_layout();
     let size = arg.layout.size;
@@ -110,9 +114,9 @@ where
                 // We only care about aligned doubles
                 if let BackendRepr::Scalar(scalar) = field.backend_repr {
                     if scalar.primitive() == Primitive::Float(Float::F64) {
-                        if offset.is_aligned(dl.f64_align.abi) {
+                        if offset.is_aligned(dl.f64_align) {
                             // Insert enough integers to cover [last_offset, offset)
-                            assert!(last_offset.is_aligned(dl.f64_align.abi));
+                            assert!(last_offset.is_aligned(dl.f64_align));
                             for _ in 0..((offset - last_offset).bits() / 64)
                                 .min((prefix.len() - prefix_index) as u64)
                             {

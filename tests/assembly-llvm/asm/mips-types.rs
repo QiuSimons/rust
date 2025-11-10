@@ -1,4 +1,4 @@
-//@ add-core-stubs
+//@ add-minicore
 //@ revisions: mips32 mips64
 //@ assembly-output: emit-asm
 //@[mips32] compile-flags: --target mips-unknown-linux-gnu
@@ -94,7 +94,6 @@ check!(reg_f32, f32, freg, "mov.s");
 // CHECK: #APP
 // CHECK: mov.s $f0, $f0
 // CHECK: #NO_APP
-#[no_mangle]
 check_reg!(f0_f32, f32, "$f0", "mov.s");
 
 // CHECK-LABEL: reg_f32_64:
@@ -107,21 +106,18 @@ check!(reg_f32_64, f32, freg, "mov.d");
 // CHECK: #APP
 // CHECK: mov.d $f0, $f0
 // CHECK: #NO_APP
-#[no_mangle]
 check_reg!(f0_f32_64, f32, "$f0", "mov.d");
 
 // CHECK-LABEL: reg_f64:
 // CHECK: #APP
 // CHECK: mov.d $f{{[0-9]+}}, $f{{[0-9]+}}
 // CHECK: #NO_APP
-#[no_mangle]
 check!(reg_f64, f64, freg, "mov.d");
 
 // CHECK-LABEL: f0_f64:
 // CHECK: #APP
 // CHECK: mov.d $f0, $f0
 // CHECK: #NO_APP
-#[no_mangle]
 check_reg!(f0_f64, f64, "$f0", "mov.d");
 
 // CHECK-LABEL: reg_ptr:

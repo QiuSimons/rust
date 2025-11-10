@@ -13,7 +13,7 @@ extern crate rustc_interface;
 extern crate rustc_session;
 extern crate rustc_span;
 
-// See docs in https://github.com/rust-lang/rust/blob/master/compiler/rustc/src/main.rs
+// See docs in https://github.com/rust-lang/rust/blob/HEAD/compiler/rustc/src/main.rs
 // about jemalloc.
 #[cfg(feature = "jemalloc")]
 extern crate tikv_jemalloc_sys as jemalloc_sys;
@@ -133,8 +133,7 @@ struct ClippyCallbacks {
 }
 
 impl rustc_driver::Callbacks for ClippyCallbacks {
-    // JUSTIFICATION: necessary in clippy driver to set `mir_opt_level`
-    #[allow(rustc::bad_opt_access)]
+    #[expect(rustc::bad_opt_access, reason = "necessary in clippy driver to set `mir_opt_level`")]
     fn config(&mut self, config: &mut interface::Config) {
         let conf_path = clippy_config::lookup_conf_file();
         let previous = config.register_lints.take();
@@ -182,17 +181,15 @@ impl rustc_driver::Callbacks for ClippyCallbacks {
     }
 }
 
-#[allow(clippy::ignored_unit_patterns)]
 fn display_help() {
     println!("{}", help_message());
 }
 
 const BUG_REPORT_URL: &str = "https://github.com/rust-lang/rust-clippy/issues/new?template=ice.yml";
 
-#[allow(clippy::too_many_lines)]
-#[allow(clippy::ignored_unit_patterns)]
+#[expect(clippy::too_many_lines)]
 pub fn main() {
-    // See docs in https://github.com/rust-lang/rust/blob/master/compiler/rustc/src/main.rs
+    // See docs in https://github.com/rust-lang/rust/blob/HEAD/compiler/rustc/src/main.rs
     // about jemalloc.
     #[cfg(feature = "jemalloc")]
     {
@@ -330,7 +327,8 @@ pub fn main() {
 
         // Do not run Clippy for Cargo's info queries so that invalid CLIPPY_ARGS are not cached
         // https://github.com/rust-lang/cargo/issues/14385
-        let info_query = has_arg(&orig_args, "-vV") || has_arg(&orig_args, "--print");
+        let info_query = has_arg(&orig_args, "-vV")
+            || arg_value(&orig_args, "--print", |val| val != "crate-root-lint-levels").is_some();
 
         let clippy_enabled = !cap_lints_allow && relevant_package && !info_query;
         if clippy_enabled {

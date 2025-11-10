@@ -10,7 +10,7 @@ use hir::{
 };
 use ide_db::{
     RootDatabase,
-    defs::Definition,
+    defs::{Definition, find_std_module},
     documentation::{DocsRangeMap, HasDocs},
     famous_defs::FamousDefs,
     generated::lints::{CLIPPY_LINTS, DEFAULT_LINTS, FEATURES},
@@ -35,7 +35,7 @@ use crate::{
 
 pub(super) fn type_info_of(
     sema: &Semantics<'_, RootDatabase>,
-    _config: &HoverConfig,
+    _config: &HoverConfig<'_>,
     expr_or_pat: &Either<ast::Expr, ast::Pat>,
     edition: Edition,
     display_target: DisplayTarget,
@@ -49,7 +49,7 @@ pub(super) fn type_info_of(
 
 pub(super) fn closure_expr(
     sema: &Semantics<'_, RootDatabase>,
-    config: &HoverConfig,
+    config: &HoverConfig<'_>,
     c: ast::ClosureExpr,
     edition: Edition,
     display_target: DisplayTarget,
@@ -60,7 +60,7 @@ pub(super) fn closure_expr(
 
 pub(super) fn try_expr(
     sema: &Semantics<'_, RootDatabase>,
-    _config: &HoverConfig,
+    _config: &HoverConfig<'_>,
     try_expr: &ast::TryExpr,
     edition: Edition,
     display_target: DisplayTarget,
@@ -128,7 +128,7 @@ pub(super) fn try_expr(
     };
     walk_and_push_ty(sema.db, &inner_ty, &mut push_new_def);
     walk_and_push_ty(sema.db, &body_ty, &mut push_new_def);
-    if let Some(actions) = HoverAction::goto_type_from_targets(sema.db, targets, edition) {
+    if let Some(actions) = HoverAction::goto_type_from_targets(sema, targets, edition) {
         res.actions.push(actions);
     }
 
@@ -155,7 +155,7 @@ pub(super) fn try_expr(
 
 pub(super) fn deref_expr(
     sema: &Semantics<'_, RootDatabase>,
-    _config: &HoverConfig,
+    _config: &HoverConfig<'_>,
     deref_expr: &ast::PrefixExpr,
     edition: Edition,
     display_target: DisplayTarget,
@@ -210,7 +210,7 @@ pub(super) fn deref_expr(
         )
         .into()
     };
-    if let Some(actions) = HoverAction::goto_type_from_targets(sema.db, targets, edition) {
+    if let Some(actions) = HoverAction::goto_type_from_targets(sema, targets, edition) {
         res.actions.push(actions);
     }
 
@@ -219,7 +219,7 @@ pub(super) fn deref_expr(
 
 pub(super) fn underscore(
     sema: &Semantics<'_, RootDatabase>,
-    config: &HoverConfig,
+    config: &HoverConfig<'_>,
     token: &SyntaxToken,
     edition: Edition,
     display_target: DisplayTarget,
@@ -263,7 +263,7 @@ pub(super) fn underscore(
 
 pub(super) fn keyword(
     sema: &Semantics<'_, RootDatabase>,
-    config: &HoverConfig,
+    config: &HoverConfig<'_>,
     token: &SyntaxToken,
     edition: Edition,
     display_target: DisplayTarget,
@@ -290,7 +290,7 @@ pub(super) fn keyword(
 /// i.e. `let S {a, ..} = S {a: 1, b: 2}`
 pub(super) fn struct_rest_pat(
     sema: &Semantics<'_, RootDatabase>,
-    _config: &HoverConfig,
+    _config: &HoverConfig<'_>,
     pattern: &ast::RecordPat,
     edition: Edition,
     display_target: DisplayTarget,
@@ -323,7 +323,7 @@ pub(super) fn struct_rest_pat(
 
         Markup::fenced_block(&s)
     };
-    if let Some(actions) = HoverAction::goto_type_from_targets(sema.db, targets, edition) {
+    if let Some(actions) = HoverAction::goto_type_from_targets(sema, targets, edition) {
         res.actions.push(actions);
     }
     res
@@ -361,7 +361,7 @@ pub(super) fn try_for_lint(attr: &ast::Attr, token: &SyntaxToken) -> Option<Hove
     let lint =
         lints.binary_search_by_key(&needle, |lint| lint.label).ok().map(|idx| &lints[idx])?;
     Some(HoverResult {
-        markup: Markup::from(format!("```\n{}\n```\n___\n\n{}", lint.label, lint.description)),
+        markup: Markup::from(format!("```\n{}\n```\n---\n\n{}", lint.label, lint.description)),
         ..Default::default()
     })
 }
@@ -371,7 +371,7 @@ pub(super) fn process_markup(
     def: Definition,
     markup: &Markup,
     markup_range_map: Option<DocsRangeMap>,
-    config: &HoverConfig,
+    config: &HoverConfig<'_>,
 ) -> Markup {
     let markup = markup.as_str();
     let markup = if config.links_in_hover {
@@ -400,7 +400,6 @@ fn definition_owner_name(db: &RootDatabase, def: Definition, edition: Edition) -
         Definition::GenericParam(generic_param) => match generic_param.parent() {
             hir::GenericDef::Adt(it) => Some(it.name(db)),
             hir::GenericDef::Trait(it) => Some(it.name(db)),
-            hir::GenericDef::TraitAlias(it) => Some(it.name(db)),
             hir::GenericDef::TypeAlias(it) => Some(it.name(db)),
 
             hir::GenericDef::Impl(i) => i.self_ty(db).as_adt().map(|adt| adt.name(db)),
@@ -482,7 +481,7 @@ pub(super) fn definition(
     macro_arm: Option<u32>,
     render_extras: bool,
     subst_types: Option<&Vec<(Symbol, Type<'_>)>>,
-    config: &HoverConfig,
+    config: &HoverConfig<'_>,
     edition: Edition,
     display_target: DisplayTarget,
 ) -> (Markup, Option<DocsRangeMap>) {
@@ -693,14 +692,14 @@ pub(super) fn definition(
         }
         let drop_info = match def {
             Definition::Field(field) => {
-                DropInfo { drop_glue: field.ty(db).drop_glue(db), has_dtor: None }
+                DropInfo { drop_glue: field.ty(db).to_type(db).drop_glue(db), has_dtor: None }
             }
             Definition::Adt(Adt::Struct(strukt)) => {
-                let struct_drop_glue = strukt.ty_placeholders(db).drop_glue(db);
+                let struct_drop_glue = strukt.ty_params(db).drop_glue(db);
                 let mut fields_drop_glue = strukt
                     .fields(db)
                     .iter()
-                    .map(|field| field.ty(db).drop_glue(db))
+                    .map(|field| field.ty(db).to_type(db).drop_glue(db))
                     .max()
                     .unwrap_or(DropGlue::None);
                 let has_dtor = match (fields_drop_glue, struct_drop_glue) {
@@ -717,10 +716,10 @@ pub(super) fn definition(
             // Unions cannot have fields with drop glue.
             Definition::Adt(Adt::Union(union)) => DropInfo {
                 drop_glue: DropGlue::None,
-                has_dtor: Some(union.ty_placeholders(db).drop_glue(db) != DropGlue::None),
+                has_dtor: Some(union.ty_params(db).drop_glue(db) != DropGlue::None),
             },
             Definition::Adt(Adt::Enum(enum_)) => {
-                let enum_drop_glue = enum_.ty_placeholders(db).drop_glue(db);
+                let enum_drop_glue = enum_.ty_params(db).drop_glue(db);
                 let fields_drop_glue = enum_
                     .variants(db)
                     .iter()
@@ -728,7 +727,7 @@ pub(super) fn definition(
                         variant
                             .fields(db)
                             .iter()
-                            .map(|field| field.ty(db).drop_glue(db))
+                            .map(|field| field.ty(db).to_type(db).drop_glue(db))
                             .max()
                             .unwrap_or(DropGlue::None)
                     })
@@ -743,13 +742,13 @@ pub(super) fn definition(
                 let fields_drop_glue = variant
                     .fields(db)
                     .iter()
-                    .map(|field| field.ty(db).drop_glue(db))
+                    .map(|field| field.ty(db).to_type(db).drop_glue(db))
                     .max()
                     .unwrap_or(DropGlue::None);
                 DropInfo { drop_glue: fields_drop_glue, has_dtor: None }
             }
             Definition::TypeAlias(type_alias) => {
-                DropInfo { drop_glue: type_alias.ty_placeholders(db).drop_glue(db), has_dtor: None }
+                DropInfo { drop_glue: type_alias.ty_params(db).drop_glue(db), has_dtor: None }
             }
             Definition::Local(local) => {
                 DropInfo { drop_glue: local.ty(db).drop_glue(db), has_dtor: None }
@@ -912,7 +911,7 @@ pub(super) fn literal(
     };
     let ty = ty.display(sema.db, display_target);
 
-    let mut s = format!("```rust\n{ty}\n```\n___\n\n");
+    let mut s = format!("```rust\n{ty}\n```\n---\n\n");
     match value {
         Ok(value) => {
             let backtick_len = value.chars().filter(|c| *c == '`').count();
@@ -980,7 +979,7 @@ fn render_notable_trait(
 
 fn type_info(
     sema: &Semantics<'_, RootDatabase>,
-    config: &HoverConfig,
+    config: &HoverConfig<'_>,
     ty: TypeInfo<'_>,
     edition: Edition,
     display_target: DisplayTarget,
@@ -1026,12 +1025,12 @@ fn type_info(
         if let Some(extra) =
             render_notable_trait(db, &notable_traits(db, &original), edition, display_target)
         {
-            desc.push_str("\n___\n");
+            desc.push_str("\n---\n");
             desc.push_str(&extra);
         };
         desc.into()
     };
-    if let Some(actions) = HoverAction::goto_type_from_targets(db, targets, edition) {
+    if let Some(actions) = HoverAction::goto_type_from_targets(sema, targets, edition) {
         res.actions.push(actions);
     }
     Some(res)
@@ -1039,7 +1038,7 @@ fn type_info(
 
 fn closure_ty(
     sema: &Semantics<'_, RootDatabase>,
-    config: &HoverConfig,
+    config: &HoverConfig<'_>,
     TypeInfo { original, adjusted }: &TypeInfo<'_>,
     edition: Edition,
     display_target: DisplayTarget,
@@ -1094,12 +1093,12 @@ fn closure_ty(
         |_| None,
         |_| None,
     ) {
-        format_to!(markup, "\n___\n{layout}");
+        format_to!(markup, "\n---\n{layout}");
     }
     format_to!(markup, "{adjusted}\n\n## Captures\n{}", captures_rendered,);
 
     let mut res = HoverResult::default();
-    if let Some(actions) = HoverAction::goto_type_from_targets(sema.db, targets, edition) {
+    if let Some(actions) = HoverAction::goto_type_from_targets(sema, targets, edition) {
         res.actions.push(actions);
     }
     res.markup = markup.into();
@@ -1159,19 +1158,6 @@ fn markup(
     } else {
         (buf.into(), None)
     }
-}
-
-fn find_std_module(
-    famous_defs: &FamousDefs<'_, '_>,
-    name: &str,
-    edition: Edition,
-) -> Option<hir::Module> {
-    let db = famous_defs.0.db;
-    let std_crate = famous_defs.std()?;
-    let std_root_module = std_crate.root_module();
-    std_root_module.children(db).find(|module| {
-        module.name(db).is_some_and(|module| module.display(db, edition).to_string() == name)
-    })
 }
 
 fn render_memory_layout(
@@ -1316,7 +1302,7 @@ fn keyword_hints(
                     KeywordHint {
                         description,
                         keyword_mod,
-                        actions: HoverAction::goto_type_from_targets(sema.db, targets, edition)
+                        actions: HoverAction::goto_type_from_targets(sema, targets, edition)
                             .into_iter()
                             .collect(),
                     }

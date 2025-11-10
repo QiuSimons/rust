@@ -8,8 +8,8 @@ use rustc_codegen_ssa::ModuleCodegen;
 use rustc_codegen_ssa::base::maybe_create_entry_wrapper;
 use rustc_codegen_ssa::mono_item::MonoItemExt;
 use rustc_codegen_ssa::traits::DebugInfoCodegenMethods;
+use rustc_hir::attrs::Linkage;
 use rustc_middle::dep_graph;
-use rustc_middle::mir::mono::Linkage;
 #[cfg(feature = "master")]
 use rustc_middle::mir::mono::Visibility;
 use rustc_middle::ty::TyCtxt;
@@ -17,7 +17,7 @@ use rustc_session::config::DebugInfo;
 use rustc_span::Symbol;
 #[cfg(feature = "master")]
 use rustc_target::spec::SymbolVisibility;
-use rustc_target::spec::{PanicStrategy, RelocModel};
+use rustc_target::spec::{Arch, RelocModel};
 
 use crate::builder::Builder;
 use crate::context::CodegenCx;
@@ -101,7 +101,7 @@ pub fn compile_codegen_unit(
         // Instantiate monomorphizations without filling out definitions yet...
         let context = new_context(tcx);
 
-        if tcx.sess.panic_strategy() == PanicStrategy::Unwind {
+        if tcx.sess.panic_strategy().unwinds() {
             context.add_command_line_option("-fexceptions");
             context.add_driver_option("-fexceptions");
         }
@@ -116,7 +116,7 @@ pub fn compile_codegen_unit(
             .map(|string| &string[1..])
             .collect();
 
-        if !disabled_features.contains("avx") && tcx.sess.target.arch == "x86_64" {
+        if !disabled_features.contains("avx") && tcx.sess.target.arch == Arch::X86_64 {
             // NOTE: we always enable AVX because the equivalent of llvm.x86.sse2.cmp.pd in GCC for
             // SSE2 is multiple builtins, so we use the AVX __builtin_ia32_cmppd instead.
             // FIXME(antoyo): use the proper builtins for llvm.x86.sse2.cmp.pd and similar.

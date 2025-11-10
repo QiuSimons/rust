@@ -6,10 +6,11 @@ use rustc_abi::ExternAbi;
 use rustc_data_structures::fx::{FxHashSet, FxIndexMap, FxIndexSet};
 use rustc_errors::codes::*;
 use rustc_errors::{Applicability, ErrorGuaranteed, pluralize, struct_span_code_err};
+use rustc_hir::attrs::AttributeKind;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::lang_items::LangItem;
-use rustc_hir::{AmbigArg, ItemKind};
+use rustc_hir::{AmbigArg, ItemKind, find_attr};
 use rustc_infer::infer::outlives::env::OutlivesEnvironment;
 use rustc_infer::infer::{self, InferCtxt, SubregionOrigin, TyCtxtInferExt};
 use rustc_lint_defs::builtin::SUPERTRAIT_ITEM_SHADOWING_DEFINITION;
@@ -142,7 +143,7 @@ where
     }
     f(&mut wfcx)?;
 
-    let errors = wfcx.select_all_or_error();
+    let errors = wfcx.evaluate_obligations_error_on_ambiguity();
     if !errors.is_empty() {
         return Err(infcx.err_ctxt().report_fulfillment_errors(errors));
     }
@@ -245,10 +246,10 @@ pub(super) fn check_item<'tcx>(
         // won't be allowed unless there's an *explicit* implementation of `Send`
         // for `T`
         hir::ItemKind::Impl(ref impl_) => {
-            crate::impl_wf_check::check_impl_wf(tcx, def_id)?;
+            crate::impl_wf_check::check_impl_wf(tcx, def_id, impl_.of_trait.is_some())?;
             let mut res = Ok(());
             if let Some(of_trait) = impl_.of_trait {
-                let header = tcx.impl_trait_header(def_id).unwrap();
+                let header = tcx.impl_trait_header(def_id);
                 let is_auto = tcx.trait_is_auto(header.trait_ref.skip_binder().def_id);
                 if let (hir::Defaultness::Default { .. }, true) = (of_trait.defaultness, is_auto) {
                     let sp = of_trait.trait_ref.path.span;
@@ -819,17 +820,7 @@ fn check_param_wf(tcx: TyCtxt<'_>, param: &ty::GenericParamDef) -> Result<(), Er
             let span = tcx.def_span(param.def_id);
             let def_id = param.def_id.expect_local();
 
-            if tcx.features().unsized_const_params() {
-                enter_wf_checking_ctxt(tcx, tcx.local_parent(def_id), |wfcx| {
-                    wfcx.register_bound(
-                        ObligationCause::new(span, def_id, ObligationCauseCode::ConstParam(ty)),
-                        wfcx.param_env,
-                        ty,
-                        tcx.require_lang_item(LangItem::UnsizedConstParamTy, span),
-                    );
-                    Ok(())
-                })
-            } else if tcx.features().adt_const_params() {
+            if tcx.features().adt_const_params() {
                 enter_wf_checking_ctxt(tcx, tcx.local_parent(def_id), |wfcx| {
                     wfcx.register_bound(
                         ObligationCause::new(span, def_id, ObligationCauseCode::ConstParam(ty)),
@@ -880,7 +871,6 @@ fn check_param_wf(tcx: TyCtxt<'_>, param: &ty::GenericParamDef) -> Result<(), Er
                     tcx,
                     tcx.param_env(param.def_id),
                     ty,
-                    LangItem::ConstParamTy,
                     cause,
                 ) {
                     // Can never implement `ConstParamTy`, don't suggest anything.
@@ -936,54 +926,62 @@ fn check_param_wf(tcx: TyCtxt<'_>, param: &ty::GenericParamDef) -> Result<(), Er
 #[instrument(level = "debug", skip(tcx))]
 pub(crate) fn check_associated_item(
     tcx: TyCtxt<'_>,
-    item_id: LocalDefId,
+    def_id: LocalDefId,
 ) -> Result<(), ErrorGuaranteed> {
-    let loc = Some(WellFormedLoc::Ty(item_id));
-    enter_wf_checking_ctxt(tcx, item_id, |wfcx| {
-        let item = tcx.associated_item(item_id);
+    let loc = Some(WellFormedLoc::Ty(def_id));
+    enter_wf_checking_ctxt(tcx, def_id, |wfcx| {
+        let item = tcx.associated_item(def_id);
 
         // Avoid bogus "type annotations needed `Foo: Bar`" errors on `impl Bar for Foo` in case
         // other `Foo` impls are incoherent.
-        tcx.ensure_ok()
-            .coherent_trait(tcx.parent(item.trait_item_def_id.unwrap_or(item_id.into())))?;
+        tcx.ensure_ok().coherent_trait(tcx.parent(item.trait_item_or_self()?))?;
 
         let self_ty = match item.container {
-            ty::AssocItemContainer::Trait => tcx.types.self_param,
-            ty::AssocItemContainer::Impl => {
+            ty::AssocContainer::Trait => tcx.types.self_param,
+            ty::AssocContainer::InherentImpl | ty::AssocContainer::TraitImpl(_) => {
                 tcx.type_of(item.container_id(tcx)).instantiate_identity()
             }
         };
 
-        let span = tcx.def_span(item_id);
+        let span = tcx.def_span(def_id);
 
         match item.kind {
             ty::AssocKind::Const { .. } => {
-                let ty = tcx.type_of(item.def_id).instantiate_identity();
-                let ty = wfcx.deeply_normalize(span, Some(WellFormedLoc::Ty(item_id)), ty);
+                let ty = tcx.type_of(def_id).instantiate_identity();
+                let ty = wfcx.deeply_normalize(span, Some(WellFormedLoc::Ty(def_id)), ty);
                 wfcx.register_wf_obligation(span, loc, ty.into());
-                check_sized_if_body(
-                    wfcx,
-                    item.def_id.expect_local(),
-                    ty,
-                    Some(span),
-                    ObligationCauseCode::SizedConstOrStatic,
-                );
+
+                let has_value = item.defaultness(tcx).has_value();
+                if find_attr!(tcx.get_all_attrs(def_id), AttributeKind::TypeConst(_)) {
+                    check_type_const(wfcx, def_id, ty, has_value)?;
+                }
+
+                if has_value {
+                    let code = ObligationCauseCode::SizedConstOrStatic;
+                    wfcx.register_bound(
+                        ObligationCause::new(span, def_id, code),
+                        wfcx.param_env,
+                        ty,
+                        tcx.require_lang_item(LangItem::Sized, span),
+                    );
+                }
+
                 Ok(())
             }
             ty::AssocKind::Fn { .. } => {
-                let sig = tcx.fn_sig(item.def_id).instantiate_identity();
+                let sig = tcx.fn_sig(def_id).instantiate_identity();
                 let hir_sig =
-                    tcx.hir_node_by_def_id(item_id).fn_sig().expect("bad signature for method");
-                check_fn_or_method(wfcx, sig, hir_sig.decl, item_id);
+                    tcx.hir_node_by_def_id(def_id).fn_sig().expect("bad signature for method");
+                check_fn_or_method(wfcx, sig, hir_sig.decl, def_id);
                 check_method_receiver(wfcx, hir_sig, item, self_ty)
             }
             ty::AssocKind::Type { .. } => {
-                if let ty::AssocItemContainer::Trait = item.container {
+                if let ty::AssocContainer::Trait = item.container {
                     check_associated_type_bounds(wfcx, item, span)
                 }
                 if item.defaultness(tcx).has_value() {
-                    let ty = tcx.type_of(item.def_id).instantiate_identity();
-                    let ty = wfcx.deeply_normalize(span, Some(WellFormedLoc::Ty(item_id)), ty);
+                    let ty = tcx.type_of(def_id).instantiate_identity();
+                    let ty = wfcx.deeply_normalize(span, Some(WellFormedLoc::Ty(def_id)), ty);
                     wfcx.register_wf_obligation(span, loc, ty.into());
                 }
                 Ok(())
@@ -1047,7 +1045,7 @@ fn check_type_defn<'tcx>(
             let needs_drop_copy = || {
                 packed && {
                     let ty = tcx.type_of(variant.tail().did).instantiate_identity();
-                    let ty = tcx.erase_regions(ty);
+                    let ty = tcx.erase_and_anonymize_regions(ty);
                     assert!(!ty.has_infer());
                     ty.needs_drop(tcx, wfcx.infcx.typing_env(wfcx.param_env))
                 }
@@ -1234,28 +1232,36 @@ pub(crate) fn check_static_item<'tcx>(
     })
 }
 
-pub(crate) fn check_const_item(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Result<(), ErrorGuaranteed> {
-    enter_wf_checking_ctxt(tcx, def_id, |wfcx| {
-        let ty = tcx.type_of(def_id).instantiate_identity();
-        let ty_span = tcx.ty_span(def_id);
-        let ty = wfcx.deeply_normalize(ty_span, Some(WellFormedLoc::Ty(def_id)), ty);
+#[instrument(level = "debug", skip(wfcx))]
+pub(super) fn check_type_const<'tcx>(
+    wfcx: &WfCheckingCtxt<'_, 'tcx>,
+    def_id: LocalDefId,
+    item_ty: Ty<'tcx>,
+    has_value: bool,
+) -> Result<(), ErrorGuaranteed> {
+    let tcx = wfcx.tcx();
+    let span = tcx.def_span(def_id);
 
-        wfcx.register_wf_obligation(ty_span, Some(WellFormedLoc::Ty(def_id)), ty.into());
-        wfcx.register_bound(
-            traits::ObligationCause::new(
-                ty_span,
-                wfcx.body_def_id,
-                ObligationCauseCode::SizedConstOrStatic,
-            ),
+    wfcx.register_bound(
+        ObligationCause::new(span, def_id, ObligationCauseCode::ConstParam(item_ty)),
+        wfcx.param_env,
+        item_ty,
+        tcx.require_lang_item(LangItem::ConstParamTy, span),
+    );
+
+    if has_value {
+        let raw_ct = tcx.const_of_item(def_id).instantiate_identity();
+        let norm_ct = wfcx.deeply_normalize(span, Some(WellFormedLoc::Ty(def_id)), raw_ct);
+        wfcx.register_wf_obligation(span, Some(WellFormedLoc::Ty(def_id)), norm_ct.into());
+
+        wfcx.register_obligation(Obligation::new(
+            tcx,
+            ObligationCause::new(span, def_id, ObligationCauseCode::WellFormed(None)),
             wfcx.param_env,
-            ty,
-            tcx.require_lang_item(LangItem::Sized, ty_span),
-        );
-
-        check_where_clauses(wfcx, def_id);
-
-        Ok(())
-    })
+            ty::PredicateKind::Clause(ty::ClauseKind::ConstArgHasType(norm_ct, item_ty)),
+        ));
+    }
+    Ok(())
 }
 
 #[instrument(level = "debug", skip(tcx, impl_))]
@@ -1270,7 +1276,7 @@ fn check_impl<'tcx>(
                 // `#[rustc_reservation_impl]` impls are not real impls and
                 // therefore don't need to be WF (the trait's `Self: Trait` predicate
                 // won't hold).
-                let trait_ref = tcx.impl_trait_ref(item.owner_id).unwrap().instantiate_identity();
+                let trait_ref = tcx.impl_trait_ref(item.owner_id).instantiate_identity();
                 // Avoid bogus "type annotations needed `Foo: Bar`" errors on `impl Bar for Foo` in case
                 // other `Foo` impls are incoherent.
                 tcx.ensure_ok().coherent_trait(trait_ref.def_id)?;
@@ -1595,33 +1601,16 @@ fn check_fn_or_method<'tcx>(
     }
 
     // If the function has a body, additionally require that the return type is sized.
-    check_sized_if_body(
-        wfcx,
-        def_id,
-        sig.output(),
-        match hir_decl.output {
-            hir::FnRetTy::Return(ty) => Some(ty.span),
-            hir::FnRetTy::DefaultReturn(_) => None,
-        },
-        ObligationCauseCode::SizedReturnType,
-    );
-}
-
-fn check_sized_if_body<'tcx>(
-    wfcx: &WfCheckingCtxt<'_, 'tcx>,
-    def_id: LocalDefId,
-    ty: Ty<'tcx>,
-    maybe_span: Option<Span>,
-    code: ObligationCauseCode<'tcx>,
-) {
-    let tcx = wfcx.tcx();
     if let Some(body) = tcx.hir_maybe_body_owned_by(def_id) {
-        let span = maybe_span.unwrap_or(body.value.span);
+        let span = match hir_decl.output {
+            hir::FnRetTy::Return(ty) => ty.span,
+            hir::FnRetTy::DefaultReturn(_) => body.value.span,
+        };
 
         wfcx.register_bound(
-            ObligationCause::new(span, def_id, code),
+            ObligationCause::new(span, def_id, ObligationCauseCode::SizedReturnType),
             wfcx.param_env,
-            ty,
+            sig.output(),
             tcx.require_lang_item(LangItem::Sized, span),
         );
     }
@@ -1663,9 +1652,7 @@ fn check_method_receiver<'tcx>(
 
     // If the receiver already has errors reported, consider it valid to avoid
     // unnecessary errors (#58712).
-    if receiver_ty.references_error() {
-        return Ok(());
-    }
+    receiver_ty.error_reported()?;
 
     let arbitrary_self_types_level = if tcx.features().arbitrary_self_types_pointers() {
         Some(ArbitrarySelfTypesLevel::WithPointers)
@@ -1815,7 +1802,11 @@ fn receiver_is_valid<'tcx>(
     if let Ok(()) = wfcx.infcx.commit_if_ok(|_| {
         let ocx = ObligationCtxt::new(wfcx.infcx);
         ocx.eq(&cause, wfcx.param_env, self_ty, receiver_ty)?;
-        if ocx.select_all_or_error().is_empty() { Ok(()) } else { Err(NoSolution) }
+        if ocx.evaluate_obligations_error_on_ambiguity().is_empty() {
+            Ok(())
+        } else {
+            Err(NoSolution)
+        }
     }) {
         return Ok(());
     }
@@ -1850,7 +1841,11 @@ fn receiver_is_valid<'tcx>(
         if let Ok(()) = wfcx.infcx.commit_if_ok(|_| {
             let ocx = ObligationCtxt::new(wfcx.infcx);
             ocx.eq(&cause, wfcx.param_env, self_ty, potential_self_ty)?;
-            if ocx.select_all_or_error().is_empty() { Ok(()) } else { Err(NoSolution) }
+            if ocx.evaluate_obligations_error_on_ambiguity().is_empty() {
+                Ok(())
+            } else {
+                Err(NoSolution)
+            }
         }) {
             wfcx.register_obligations(autoderef.into_obligations());
             return Ok(());
@@ -2287,8 +2282,7 @@ fn lint_redundant_lifetimes<'tcx>(
             // Proceed
         }
         DefKind::AssocFn | DefKind::AssocTy | DefKind::AssocConst => {
-            let parent_def_id = tcx.local_parent(owner_id);
-            if matches!(tcx.def_kind(parent_def_id), DefKind::Impl { of_trait: true }) {
+            if tcx.trait_impl_of_assoc(owner_id.to_def_id()).is_some() {
                 // Don't check for redundant lifetimes for associated items of trait
                 // implementations, since the signature is required to be compatible
                 // with the trait, even if the implementation implies some lifetimes

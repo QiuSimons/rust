@@ -203,6 +203,9 @@ declare_features! (
     (accepted, expr_fragment_specifier_2024, "1.83.0", Some(123742)),
     /// Allows arbitrary expressions in key-value attributes at parse time.
     (accepted, extended_key_value_attributes, "1.54.0", Some(78835)),
+    /// Allows using `aapcs`, `efiapi`, `sysv64` and `win64` as calling conventions
+    /// for functions with varargs.
+    (accepted, extended_varargs_abi_support, "1.91.0", Some(100189)),
     /// Allows resolving absolute paths as paths from other crates.
     (accepted, extern_absolute_paths, "1.30.0", Some(44660)),
     /// Allows `extern crate foo as bar;`. This puts `bar` into extern prelude.
@@ -384,6 +387,8 @@ declare_features! (
     (accepted, return_position_impl_trait_in_trait, "1.75.0", Some(91611)),
     /// Allows code like `let x: &'static u32 = &42` to work (RFC 1414).
     (accepted, rvalue_static_promotion, "1.21.0", Some(38865)),
+    /// Allows use of the `vector` and related s390x target features.
+    (accepted, s390x_target_feature_vector, "CURRENT_RUSTC_VERSION", Some(145649)),
     /// Allows `Self` in type definitions (RFC 2300).
     (accepted, self_in_typedefs, "1.32.0", Some(49303)),
     /// Allows `Self` struct constructor (RFC 2302).
@@ -396,6 +401,8 @@ declare_features! (
     (accepted, slice_patterns, "1.42.0", Some(62254)),
     /// Allows use of `&foo[a..b]` as a slicing syntax.
     (accepted, slicing_syntax, "1.0.0", None),
+    /// Allows use of `sse4a` target feature.
+    (accepted, sse4a_target_feature, "1.91.0", Some(44839)),
     /// Allows elision of `'static` lifetimes in `static`s and `const`s.
     (accepted, static_in_const, "1.17.0", Some(35897)),
     /// Allows the definition recursive static items.
@@ -408,6 +415,8 @@ declare_features! (
     (accepted, target_feature, "1.27.0", None),
     /// Allows the use of `#[target_feature]` on safe functions.
     (accepted, target_feature_11, "1.86.0", Some(69098)),
+    /// Allows use of `tbm` target feature.
+    (accepted, tbm_target_feature, "1.91.0", Some(44839)),
     /// Allows `fn main()` with return types which implements `Termination` (RFC 1937).
     (accepted, termination_trait, "1.26.0", Some(43301)),
     /// Allows `#[test]` functions where the return type implements `Termination` (RFC 1937).

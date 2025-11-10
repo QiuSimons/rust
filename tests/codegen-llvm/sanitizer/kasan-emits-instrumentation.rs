@@ -1,6 +1,6 @@
 // Verifies that `-Zsanitizer=kernel-address` emits sanitizer instrumentation.
 
-//@ add-core-stubs
+//@ add-minicore
 //@ compile-flags: -Zsanitizer=kernel-address -Copt-level=0
 //@ revisions: aarch64 riscv64imac riscv64gc x86_64
 //@[aarch64] compile-flags: --target aarch64-unknown-none
@@ -13,7 +13,7 @@
 //@[x86_64] needs-llvm-components: x86
 
 #![crate_type = "rlib"]
-#![feature(no_core, no_sanitize, lang_items)]
+#![feature(no_core, sanitize, lang_items)]
 #![no_core]
 
 extern crate minicore;
@@ -25,7 +25,7 @@ use minicore::*;
 // CHECK:       start:
 // CHECK-NOT:   call void @__asan_report_load
 // CHECK:       }
-#[no_sanitize(address)]
+#[sanitize(address = "off")]
 pub fn unsanitized(b: &mut u8) -> u8 {
     *b
 }

@@ -1,12 +1,12 @@
 use std::num::IntErrorKind;
 
-use rustc_ast as ast;
+use rustc_ast::{self as ast, Path};
 use rustc_errors::codes::*;
 use rustc_errors::{
     Applicability, Diag, DiagArgValue, DiagCtxtHandle, Diagnostic, EmissionGuarantee, Level,
 };
 use rustc_feature::AttributeTemplate;
-use rustc_hir::AttrPath;
+use rustc_hir::{AttrPath, Target};
 use rustc_macros::{Diagnostic, LintDiagnostic, Subdiagnostic};
 use rustc_span::{Span, Symbol};
 
@@ -460,6 +460,34 @@ pub(crate) struct NullOnLinkSection {
 }
 
 #[derive(Diagnostic)]
+#[diag(attr_parsing_null_on_objc_class)]
+pub(crate) struct NullOnObjcClass {
+    #[primary_span]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(attr_parsing_null_on_objc_selector)]
+pub(crate) struct NullOnObjcSelector {
+    #[primary_span]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(attr_parsing_objc_class_expected_string_literal)]
+pub(crate) struct ObjcClassExpectedStringLiteral {
+    #[primary_span]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(attr_parsing_objc_selector_expected_string_literal)]
+pub(crate) struct ObjcSelectorExpectedStringLiteral {
+    #[primary_span]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
 #[diag(attr_parsing_stability_outside_std, code = E0734)]
 pub(crate) struct StabilityOutsideStd {
     #[primary_span]
@@ -475,9 +503,38 @@ pub(crate) struct EmptyConfusables {
 
 #[derive(LintDiagnostic)]
 #[diag(attr_parsing_empty_attribute)]
+#[note]
 pub(crate) struct EmptyAttributeList {
     #[suggestion(code = "", applicability = "machine-applicable")]
     pub attr_span: Span,
+    pub attr_path: AttrPath,
+    pub valid_without_list: bool,
+}
+
+#[derive(LintDiagnostic)]
+#[diag(attr_parsing_invalid_target_lint)]
+#[warning]
+#[help]
+pub(crate) struct InvalidTargetLint {
+    pub name: AttrPath,
+    pub target: &'static str,
+    pub applied: DiagArgValue,
+    pub only: &'static str,
+    #[suggestion(code = "", applicability = "machine-applicable", style = "tool-only")]
+    pub attr_span: Span,
+}
+
+#[derive(Diagnostic)]
+#[help]
+#[diag(attr_parsing_invalid_target)]
+pub(crate) struct InvalidTarget {
+    #[primary_span]
+    #[suggestion(code = "", applicability = "machine-applicable", style = "tool-only")]
+    pub span: Span,
+    pub name: AttrPath,
+    pub target: &'static str,
+    pub applied: DiagArgValue,
+    pub only: &'static str,
 }
 
 #[derive(Diagnostic)]
@@ -532,7 +589,7 @@ pub(crate) struct LinkOrdinalOutOfRange {
     pub ordinal: u128,
 }
 
-pub(crate) enum AttributeParseErrorReason {
+pub(crate) enum AttributeParseErrorReason<'a> {
     ExpectedNoArgs,
     ExpectedStringLiteral {
         byte_string: Option<Span>,
@@ -545,7 +602,7 @@ pub(crate) enum AttributeParseErrorReason {
     ExpectedNameValue(Option<Symbol>),
     DuplicateKey(Symbol),
     ExpectedSpecificArgument {
-        possibilities: Vec<&'static str>,
+        possibilities: &'a [Symbol],
         strings: bool,
         /// Should we tell the user to write a list when they didn't?
         list: bool,
@@ -553,19 +610,35 @@ pub(crate) enum AttributeParseErrorReason {
     ExpectedIdentifier,
 }
 
-pub(crate) struct AttributeParseError {
+/// A description of a thing that can be parsed using an attribute parser.
+#[derive(Copy, Clone)]
+pub enum ParsedDescription {
+    /// Used when parsing attributes.
+    Attribute,
+    /// Used when parsing some macros, such as the `cfg!()` macro.
+    Macro,
+}
+
+pub(crate) struct AttributeParseError<'a> {
     pub(crate) span: Span,
     pub(crate) attr_span: Span,
     pub(crate) template: AttributeTemplate,
-    pub(crate) attribute: AttrPath,
-    pub(crate) reason: AttributeParseErrorReason,
+    pub(crate) path: AttrPath,
+    pub(crate) description: ParsedDescription,
+    pub(crate) reason: AttributeParseErrorReason<'a>,
+    pub(crate) suggestions: Vec<String>,
 }
 
-impl<'a, G: EmissionGuarantee> Diagnostic<'a, G> for AttributeParseError {
+impl<'a, G: EmissionGuarantee> Diagnostic<'a, G> for AttributeParseError<'_> {
     fn into_diag(self, dcx: DiagCtxtHandle<'a>, level: Level) -> Diag<'a, G> {
-        let name = self.attribute.to_string();
+        let name = self.path.to_string();
 
-        let mut diag = Diag::new(dcx, level, format!("malformed `{name}` attribute input"));
+        let description = match self.description {
+            ParsedDescription::Attribute => "attribute",
+            ParsedDescription::Macro => "macro",
+        };
+
+        let mut diag = Diag::new(dcx, level, format!("malformed `{name}` {description} input"));
         diag.span(self.attr_span);
         diag.code(E0539);
         match self.reason {
@@ -630,7 +703,7 @@ impl<'a, G: EmissionGuarantee> Diagnostic<'a, G> for AttributeParseError {
                 list: false,
             } => {
                 let quote = if strings { '"' } else { '`' };
-                match possibilities.as_slice() {
+                match possibilities {
                     &[] => {}
                     &[x] => {
                         diag.span_label(
@@ -660,18 +733,18 @@ impl<'a, G: EmissionGuarantee> Diagnostic<'a, G> for AttributeParseError {
                 list: true,
             } => {
                 let quote = if strings { '"' } else { '`' };
-                match possibilities.as_slice() {
+                match possibilities {
                     &[] => {}
                     &[x] => {
                         diag.span_label(
                             self.span,
                             format!(
-                                "this attribute is only valid with {quote}{x}{quote} as an argument"
+                                "this {description} is only valid with {quote}{x}{quote} as an argument"
                             ),
                         );
                     }
                     [first, second] => {
-                        diag.span_label(self.span, format!("this attribute is only valid with either {quote}{first}{quote} or {quote}{second}{quote} as an argument"));
+                        diag.span_label(self.span, format!("this {description} is only valid with either {quote}{first}{quote} or {quote}{second}{quote} as an argument"));
                     }
                     [first @ .., second_to_last, last] => {
                         let mut res = String::new();
@@ -682,7 +755,7 @@ impl<'a, G: EmissionGuarantee> Diagnostic<'a, G> for AttributeParseError {
                             "{quote}{second_to_last}{quote} or {quote}{last}{quote}"
                         ));
 
-                        diag.span_label(self.span, format!("this attribute is only valid with one of the following arguments: {res}"));
+                        diag.span_label(self.span, format!("this {description} is only valid with one of the following arguments: {res}"));
                     }
                 }
             }
@@ -694,18 +767,230 @@ impl<'a, G: EmissionGuarantee> Diagnostic<'a, G> for AttributeParseError {
         if let Some(link) = self.template.docs {
             diag.note(format!("for more information, visit <{link}>"));
         }
-        let suggestions = self.template.suggestions(false, &name);
+
         diag.span_suggestions(
             self.attr_span,
-            if suggestions.len() == 1 {
-                "must be of the form"
+            if self.suggestions.len() == 1 {
+                "must be of the form".to_string()
             } else {
-                "try changing it to one of the following valid forms of the attribute"
+                format!("try changing it to one of the following valid forms of the {description}")
             },
-            suggestions,
+            self.suggestions,
             Applicability::HasPlaceholders,
         );
 
         diag
     }
+}
+
+#[derive(Diagnostic)]
+#[diag(attr_parsing_invalid_attr_unsafe)]
+#[note]
+pub(crate) struct InvalidAttrUnsafe {
+    #[primary_span]
+    #[label]
+    pub span: Span,
+    pub name: Path,
+}
+
+#[derive(Diagnostic)]
+#[diag(attr_parsing_unsafe_attr_outside_unsafe)]
+pub(crate) struct UnsafeAttrOutsideUnsafe {
+    #[primary_span]
+    #[label]
+    pub span: Span,
+    #[subdiagnostic]
+    pub suggestion: UnsafeAttrOutsideUnsafeSuggestion,
+}
+
+#[derive(Subdiagnostic)]
+#[multipart_suggestion(
+    attr_parsing_unsafe_attr_outside_unsafe_suggestion,
+    applicability = "machine-applicable"
+)]
+pub(crate) struct UnsafeAttrOutsideUnsafeSuggestion {
+    #[suggestion_part(code = "unsafe(")]
+    pub left: Span,
+    #[suggestion_part(code = ")")]
+    pub right: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(attr_parsing_meta_bad_delim)]
+pub(crate) struct MetaBadDelim {
+    #[primary_span]
+    pub span: Span,
+    #[subdiagnostic]
+    pub sugg: MetaBadDelimSugg,
+}
+
+#[derive(Subdiagnostic)]
+#[multipart_suggestion(
+    attr_parsing_meta_bad_delim_suggestion,
+    applicability = "machine-applicable"
+)]
+pub(crate) struct MetaBadDelimSugg {
+    #[suggestion_part(code = "(")]
+    pub open: Span,
+    #[suggestion_part(code = ")")]
+    pub close: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(attr_parsing_invalid_meta_item)]
+pub(crate) struct InvalidMetaItem {
+    #[primary_span]
+    pub span: Span,
+    pub descr: String,
+    #[subdiagnostic]
+    pub quote_ident_sugg: Option<InvalidMetaItemQuoteIdentSugg>,
+    #[subdiagnostic]
+    pub remove_neg_sugg: Option<InvalidMetaItemRemoveNegSugg>,
+}
+
+#[derive(Subdiagnostic)]
+#[multipart_suggestion(attr_parsing_quote_ident_sugg, applicability = "machine-applicable")]
+pub(crate) struct InvalidMetaItemQuoteIdentSugg {
+    #[suggestion_part(code = "\"")]
+    pub before: Span,
+    #[suggestion_part(code = "\"")]
+    pub after: Span,
+}
+
+#[derive(Subdiagnostic)]
+#[multipart_suggestion(attr_parsing_remove_neg_sugg, applicability = "machine-applicable")]
+pub(crate) struct InvalidMetaItemRemoveNegSugg {
+    #[suggestion_part(code = "")]
+    pub negative_sign: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(attr_parsing_suffixed_literal_in_attribute)]
+#[help]
+pub(crate) struct SuffixedLiteralInAttribute {
+    #[primary_span]
+    pub span: Span,
+}
+
+#[derive(LintDiagnostic)]
+#[diag(attr_parsing_invalid_style)]
+pub(crate) struct InvalidAttrStyle {
+    pub name: AttrPath,
+    pub is_used_as_inner: bool,
+    #[note]
+    pub target_span: Option<Span>,
+    pub target: Target,
+}
+
+#[derive(Diagnostic)]
+#[diag(attr_parsing_empty_link_name, code = E0454)]
+pub(crate) struct EmptyLinkName {
+    #[primary_span]
+    #[label]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(attr_parsing_link_framework_apple, code = E0455)]
+pub(crate) struct LinkFrameworkApple {
+    #[primary_span]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(attr_parsing_incompatible_wasm_link)]
+pub(crate) struct IncompatibleWasmLink {
+    #[primary_span]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(attr_parsing_link_requires_name, code = E0459)]
+pub(crate) struct LinkRequiresName {
+    #[primary_span]
+    #[label]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(attr_parsing_raw_dylib_no_nul)]
+pub(crate) struct RawDylibNoNul {
+    #[primary_span]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(attr_parsing_raw_dylib_only_windows, code = E0455)]
+pub(crate) struct RawDylibOnlyWindows {
+    #[primary_span]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(attr_parsing_invalid_link_modifier)]
+pub(crate) struct InvalidLinkModifier {
+    #[primary_span]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(attr_parsing_multiple_modifiers)]
+pub(crate) struct MultipleModifiers {
+    #[primary_span]
+    pub span: Span,
+    pub modifier: Symbol,
+}
+
+#[derive(Diagnostic)]
+#[diag(attr_parsing_import_name_type_x86)]
+pub(crate) struct ImportNameTypeX86 {
+    #[primary_span]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(attr_parsing_bundle_needs_static)]
+pub(crate) struct BundleNeedsStatic {
+    #[primary_span]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(attr_parsing_whole_archive_needs_static)]
+pub(crate) struct WholeArchiveNeedsStatic {
+    #[primary_span]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(attr_parsing_as_needed_compatibility)]
+pub(crate) struct AsNeededCompatibility {
+    #[primary_span]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(attr_parsing_import_name_type_raw)]
+pub(crate) struct ImportNameTypeRaw {
+    #[primary_span]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(attr_parsing_limit_invalid)]
+pub(crate) struct LimitInvalid<'a> {
+    #[primary_span]
+    pub span: Span,
+    #[label]
+    pub value_span: Span,
+    pub error_str: &'a str,
+}
+
+#[derive(Diagnostic)]
+#[diag(attr_parsing_cfg_attr_bad_delim)]
+pub(crate) struct CfgAttrBadDelim {
+    #[primary_span]
+    pub span: Span,
+    #[subdiagnostic]
+    pub sugg: MetaBadDelimSugg,
 }

@@ -22,7 +22,7 @@ use rustc_target::spec::{
 use crate::config::*;
 use crate::search_paths::SearchPath;
 use crate::utils::NativeLib;
-use crate::{EarlyDiagCtxt, lint};
+use crate::{EarlyDiagCtxt, Session, lint};
 
 macro_rules! insert {
     ($opt_name:ident, $opt_expr:expr, $sub_hashes:expr) => {
@@ -83,9 +83,76 @@ pub struct TargetModifier {
     pub value_name: String,
 }
 
+mod target_modifier_consistency_check {
+    use super::*;
+    pub(super) fn sanitizer(l: &TargetModifier, r: Option<&TargetModifier>) -> bool {
+        let mut lparsed: SanitizerSet = Default::default();
+        let lval = if l.value_name.is_empty() { None } else { Some(l.value_name.as_str()) };
+        parse::parse_sanitizers(&mut lparsed, lval);
+
+        let mut rparsed: SanitizerSet = Default::default();
+        let rval = r.filter(|v| !v.value_name.is_empty()).map(|v| v.value_name.as_str());
+        parse::parse_sanitizers(&mut rparsed, rval);
+
+        // Some sanitizers need to be target modifiers, and some do not.
+        // For now, we should mark all sanitizers as target modifiers except for these:
+        // AddressSanitizer, LeakSanitizer
+        let tmod_sanitizers = SanitizerSet::MEMORY
+            | SanitizerSet::THREAD
+            | SanitizerSet::HWADDRESS
+            | SanitizerSet::CFI
+            | SanitizerSet::MEMTAG
+            | SanitizerSet::SHADOWCALLSTACK
+            | SanitizerSet::KCFI
+            | SanitizerSet::KERNELADDRESS
+            | SanitizerSet::SAFESTACK
+            | SanitizerSet::DATAFLOW;
+
+        lparsed & tmod_sanitizers == rparsed & tmod_sanitizers
+    }
+    pub(super) fn sanitizer_cfi_normalize_integers(
+        sess: &Session,
+        l: &TargetModifier,
+        r: Option<&TargetModifier>,
+    ) -> bool {
+        // For kCFI, the helper flag -Zsanitizer-cfi-normalize-integers should also be a target modifier
+        if sess.sanitizers().contains(SanitizerSet::KCFI) {
+            if let Some(r) = r {
+                return l.extend().tech_value == r.extend().tech_value;
+            } else {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 impl TargetModifier {
     pub fn extend(&self) -> ExtendedTargetModifierInfo {
         self.opt.reparse(&self.value_name)
+    }
+    // Custom consistency check for target modifiers (or default `l.tech_value == r.tech_value`)
+    // When other is None, consistency with default value is checked
+    pub fn consistent(&self, sess: &Session, other: Option<&TargetModifier>) -> bool {
+        assert!(other.is_none() || self.opt == other.unwrap().opt);
+        match self.opt {
+            OptionsTargetModifiers::UnstableOptions(unstable) => match unstable {
+                UnstableOptionsTargetModifiers::sanitizer => {
+                    return target_modifier_consistency_check::sanitizer(self, other);
+                }
+                UnstableOptionsTargetModifiers::sanitizer_cfi_normalize_integers => {
+                    return target_modifier_consistency_check::sanitizer_cfi_normalize_integers(
+                        sess, self, other,
+                    );
+                }
+                _ => {}
+            },
+            _ => {}
+        };
+        match other {
+            Some(other) => self.extend().tech_value == other.extend().tech_value,
+            None => false,
+        }
     }
 }
 
@@ -725,7 +792,7 @@ mod desc {
     pub(crate) const parse_list: &str = "a space-separated list of strings";
     pub(crate) const parse_list_with_polarity: &str =
         "a comma-separated list of strings, with elements beginning with + or -";
-    pub(crate) const parse_autodiff: &str = "a comma separated list of settings: `Enable`, `PrintSteps`, `PrintTA`, `PrintTAFn`, `PrintAA`, `PrintPerf`, `PrintModBefore`, `PrintModAfter`, `PrintModFinal`, `PrintPasses`, `NoPostopt`, `LooseTypes`, `Inline`";
+    pub(crate) const parse_autodiff: &str = "a comma separated list of settings: `Enable`, `PrintSteps`, `PrintTA`, `PrintTAFn`, `PrintAA`, `PrintPerf`, `PrintModBefore`, `PrintModAfter`, `PrintModFinal`, `PrintPasses`, `NoPostopt`, `LooseTypes`, `Inline`, `NoTT`";
     pub(crate) const parse_offload: &str = "a comma separated list of settings: `Enable`";
     pub(crate) const parse_comma_list: &str = "a comma-separated list of strings";
     pub(crate) const parse_opt_comma_list: &str = parse_comma_list;
@@ -735,13 +802,13 @@ mod desc {
     pub(crate) const parse_threads: &str = parse_number;
     pub(crate) const parse_time_passes_format: &str = "`text` (default) or `json`";
     pub(crate) const parse_passes: &str = "a space-separated list of passes, or `all`";
-    pub(crate) const parse_panic_strategy: &str = "either `unwind` or `abort`";
+    pub(crate) const parse_panic_strategy: &str = "either `unwind`, `abort`, or `immediate-abort`";
     pub(crate) const parse_on_broken_pipe: &str = "either `kill`, `error`, or `inherit`";
     pub(crate) const parse_patchable_function_entry: &str = "either two comma separated integers (total_nops,prefix_nops), with prefix_nops <= total_nops, or one integer (total_nops)";
     pub(crate) const parse_opt_panic_strategy: &str = parse_panic_strategy;
     pub(crate) const parse_oom_strategy: &str = "either `panic` or `abort`";
     pub(crate) const parse_relro_level: &str = "one of: `full`, `partial`, or `off`";
-    pub(crate) const parse_sanitizers: &str = "comma separated list of sanitizers: `address`, `cfi`, `dataflow`, `hwaddress`, `kcfi`, `kernel-address`, `leak`, `memory`, `memtag`, `safestack`, `shadow-call-stack`, or `thread`";
+    pub(crate) const parse_sanitizers: &str = "comma separated list of sanitizers: `address`, `cfi`, `dataflow`, `hwaddress`, `kcfi`, `kernel-address`, `leak`, `memory`, `memtag`, `safestack`, `shadow-call-stack`, `thread`, or 'realtime'";
     pub(crate) const parse_sanitizer_memory_track_origins: &str = "0, 1, or 2";
     pub(crate) const parse_cfguard: &str =
         "either a boolean (`yes`, `no`, `on`, `off`, etc), `checks`, or `nochecks`";
@@ -797,13 +864,14 @@ mod desc {
     pub(crate) const parse_linker_features: &str =
         "a list of enabled (`+` prefix) and disabled (`-` prefix) features: `lld`";
     pub(crate) const parse_polonius: &str = "either no value or `legacy` (the default), or `next`";
+    pub(crate) const parse_annotate_moves: &str =
+        "either a boolean (`yes`, `no`, `on`, `off`, etc.), or a size limit in bytes";
     pub(crate) const parse_stack_protector: &str =
         "one of (`none` (default), `basic`, `strong`, or `all`)";
-    pub(crate) const parse_branch_protection: &str = "a `,` separated combination of `bti`, `pac-ret`, followed by a combination of `pc`, `b-key`, or `leaf`";
+    pub(crate) const parse_branch_protection: &str = "a `,` separated combination of `bti`, `gcs`, `pac-ret`, (optionally with `pc`, `b-key`, `leaf` if `pac-ret` is set)";
     pub(crate) const parse_proc_macro_execution_strategy: &str =
         "one of supported execution strategies (`same-thread`, or `cross-thread`)";
-    pub(crate) const parse_remap_path_scope: &str =
-        "comma separated list of scopes: `macro`, `diagnostics`, `debuginfo`, `object`, `all`";
+    pub(crate) const parse_remap_path_scope: &str = "comma separated list of scopes: `macro`, `diagnostics`, `debuginfo`, `coverage`, `object`, `all`";
     pub(crate) const parse_inlining_threshold: &str =
         "either a boolean (`yes`, `no`, `on`, `off`, etc), or a non-negative number";
     pub(crate) const parse_llvm_module_flag: &str = "<key>:<type>:<value>:<behavior>. Type must currently be `u32`. Behavior should be one of (`error`, `warning`, `require`, `override`, `append`, `appendunique`, `max`, `min`)";
@@ -881,6 +949,29 @@ pub mod parse {
             }
             _ => false,
         }
+    }
+
+    pub(crate) fn parse_annotate_moves(slot: &mut AnnotateMoves, v: Option<&str>) -> bool {
+        let mut bslot = false;
+        let mut nslot = 0u64;
+
+        *slot = match v {
+            // No value provided: -Z annotate-moves (enable with default limit)
+            None => AnnotateMoves::Enabled(None),
+            // Explicit boolean value provided: -Z annotate-moves=yes/no
+            s @ Some(_) if parse_bool(&mut bslot, s) => {
+                if bslot {
+                    AnnotateMoves::Enabled(None)
+                } else {
+                    AnnotateMoves::Disabled
+                }
+            }
+            // With numeric limit provided: -Z annotate-moves=1234
+            s @ Some(_) if parse_number(&mut nslot, s) => AnnotateMoves::Enabled(Some(nslot)),
+            _ => return false,
+        };
+
+        true
     }
 
     /// Use this for any string option that has a static default.
@@ -1098,6 +1189,7 @@ pub mod parse {
         match v {
             Some("unwind") => *slot = Some(PanicStrategy::Unwind),
             Some("abort") => *slot = Some(PanicStrategy::Abort),
+            Some("immediate-abort") => *slot = Some(PanicStrategy::ImmediateAbort),
             _ => return false,
         }
         true
@@ -1107,6 +1199,7 @@ pub mod parse {
         match v {
             Some("unwind") => *slot = PanicStrategy::Unwind,
             Some("abort") => *slot = PanicStrategy::Abort,
+            Some("immediate-abort") => *slot = PanicStrategy::ImmediateAbort,
             _ => return false,
         }
         true
@@ -1185,6 +1278,7 @@ pub mod parse {
                     "thread" => SanitizerSet::THREAD,
                     "hwaddress" => SanitizerSet::HWADDRESS,
                     "safestack" => SanitizerSet::SAFESTACK,
+                    "realtime" => SanitizerSet::REALTIME,
                     _ => return false,
                 }
             }
@@ -1412,6 +1506,7 @@ pub mod parse {
                 "PrintPasses" => AutoDiff::PrintPasses,
                 "LooseTypes" => AutoDiff::LooseTypes,
                 "Inline" => AutoDiff::Inline,
+                "NoTT" => AutoDiff::NoTT,
                 _ => {
                     // FIXME(ZuseZ4): print an error saying which value is not recognized
                     return false;
@@ -1635,6 +1730,7 @@ pub mod parse {
                     "macro" => RemapPathScopeComponents::MACRO,
                     "diagnostics" => RemapPathScopeComponents::DIAGNOSTICS,
                     "debuginfo" => RemapPathScopeComponents::DEBUGINFO,
+                    "coverage" => RemapPathScopeComponents::COVERAGE,
                     "object" => RemapPathScopeComponents::OBJECT,
                     "all" => RemapPathScopeComponents::all(),
                     _ => return false,
@@ -1836,6 +1932,7 @@ pub mod parse {
                             Some(pac) => pac.pc = true,
                             _ => return false,
                         },
+                        "gcs" => slot.gcs = true,
                         _ => return false,
                     };
                 }
@@ -2022,6 +2119,8 @@ options! {
         "instrument the generated code to support LLVM source-based code coverage reports \
         (note, the compiler build config must include `profiler = true`); \
         implies `-C symbol-mangling-version=v0`"),
+    jump_tables: bool = (true, parse_bool, [TRACKED],
+        "allow jump table and lookup table generation from switch case lowering (default: yes)"),
     link_arg: (/* redirected to link_args */) = ((), parse_string_push, [UNTRACKED],
         "a single extra argument to append to the linker invocation (can be used several times)"),
     link_args: Vec<String> = (Vec::new(), parse_list, [UNTRACKED],
@@ -2125,6 +2224,9 @@ options! {
         "only allow the listed language features to be enabled in code (comma separated)"),
     always_encode_mir: bool = (false, parse_bool, [TRACKED],
         "encode MIR of all functions into the crate metadata (default: no)"),
+    annotate_moves: AnnotateMoves = (AnnotateMoves::Disabled, parse_annotate_moves, [TRACKED],
+        "emit debug info for compiler-generated move and copy operations \
+        to make them visible in profilers. Can be a boolean or a size limit in bytes (default: disabled)"),
     assert_incr_state: Option<String> = (None, parse_opt_string, [UNTRACKED],
         "assert that the incremental cache is in given state: \
          either `loaded` or `not-loaded`."),
@@ -2165,6 +2267,8 @@ options! {
         "hash algorithm of source files used to check freshness in cargo (`blake3` or `sha256`)"),
     codegen_backend: Option<String> = (None, parse_opt_string, [TRACKED],
         "the backend to use"),
+    codegen_source_order: bool = (false, parse_bool, [UNTRACKED],
+        "emit mono items in the order of spans in source files (default: no)"),
     contract_checks: Option<bool> = (None, parse_opt_bool, [TRACKED],
         "emit runtime checks for contract pre- and post-conditions (default: no)"),
     coverage_options: CoverageOptions = (CoverageOptions::default(), parse_coverage_options, [TRACKED],
@@ -2293,6 +2397,8 @@ options! {
         - hashes of green query instances
         - hash collisions of query keys
         - hash collisions when creating dep-nodes"),
+    indirect_branch_cs_prefix: bool = (false, parse_bool, [TRACKED TARGET_MODIFIER],
+        "add `cs` prefix to `call` and `jmp` to indirect thunks (default: no)"),
     inline_llvm: bool = (true, parse_bool, [TRACKED],
         "enable LLVM inlining (default: yes)"),
     inline_mir: Option<bool> = (None, parse_opt_bool, [TRACKED],
@@ -2400,8 +2506,6 @@ options! {
         "omit DWARF address ranges that give faster lookups"),
     no_implied_bounds_compat: bool = (false, parse_bool, [TRACKED],
         "disable the compatibility version of the `implied_bounds_ty` query"),
-    no_jump_tables: bool = (false, parse_no_value, [TRACKED],
-        "disable the jump tables and lookup tables that can be generated from a switch case lowering"),
     no_leak_check: bool = (false, parse_no_value, [UNTRACKED],
         "disable the 'leak check' for subtyping; unsound, but useful for tests"),
     no_link: bool = (false, parse_no_value, [TRACKED],
@@ -2500,13 +2604,14 @@ written to standard error output)"),
     retpoline_external_thunk: bool = (false, parse_bool, [TRACKED TARGET_MODIFIER],
         "enables retpoline-external-thunk, retpoline-indirect-branches and retpoline-indirect-calls \
         target features (default: no)"),
-    sanitizer: SanitizerSet = (SanitizerSet::empty(), parse_sanitizers, [TRACKED],
+    #[rustc_lint_opt_deny_field_access("use `Session::sanitizers()` instead of this field")]
+    sanitizer: SanitizerSet = (SanitizerSet::empty(), parse_sanitizers, [TRACKED TARGET_MODIFIER],
         "use a sanitizer"),
     sanitizer_cfi_canonical_jump_tables: Option<bool> = (Some(true), parse_opt_bool, [TRACKED],
         "enable canonical jump tables (default: yes)"),
     sanitizer_cfi_generalize_pointers: Option<bool> = (None, parse_opt_bool, [TRACKED],
         "enable generalizing pointer types (default: no)"),
-    sanitizer_cfi_normalize_integers: Option<bool> = (None, parse_opt_bool, [TRACKED],
+    sanitizer_cfi_normalize_integers: Option<bool> = (None, parse_opt_bool, [TRACKED TARGET_MODIFIER],
         "enable normalizing integer types (default: no)"),
     sanitizer_dataflow_abilist: Vec<String> = (Vec::new(), parse_comma_list, [TRACKED],
         "additional ABI list files that control how shadow parameters are passed (comma separated)"),
@@ -2559,6 +2664,8 @@ written to standard error output)"),
                  file which is ignored by the linker
         `single`: sections which do not require relocation are written into object file but ignored
                   by the linker"),
+    split_dwarf_out_dir : Option<PathBuf> = (None, parse_opt_pathbuf, [TRACKED],
+        "location for writing split DWARF objects (`.dwo`) if enabled"),
     split_lto_unit: Option<bool> = (None, parse_opt_bool, [TRACKED],
         "enable LTO unit splitting (default: no)"),
     src_hash_algorithm: Option<SourceFileHashAlgorithm> = (None, parse_src_file_hash, [TRACKED],

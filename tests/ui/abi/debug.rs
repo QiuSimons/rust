@@ -1,4 +1,4 @@
-//@ add-core-stubs
+//@ add-minicore
 //@ normalize-stderr: "(abi|pref|unadjusted_abi_align): Align\([1-8] bytes\)" -> "$1: $$SOME_ALIGN"
 //@ normalize-stderr: "randomization_seed: \d+" -> "randomization_seed: $$SEED"
 //@ normalize-stderr: "(size): Size\([48] bytes\)" -> "$1: $$SOME_SIZE"
@@ -8,10 +8,14 @@
 //@ normalize-stderr: "(valid_range): [1-9]\.\.=(429496729[0-9]|1844674407370955161[0-9])" -> "$1: $$NON_NULL"
 // Some attributes are only computed for release builds:
 //@ compile-flags: -O
-//@ revisions: generic riscv64
+//@ revisions: generic riscv64 loongarch64
 //@ [riscv64] compile-flags: --target riscv64gc-unknown-linux-gnu
 //@ [riscv64] needs-llvm-components: riscv
+//@ [loongarch64] compile-flags: --target loongarch64-unknown-linux-gnu
+//@ [loongarch64] needs-llvm-components: loongarch
 //@ [generic] ignore-riscv64
+//@ [generic] ignore-loongarch64
+//@ ignore-backends: gcc
 #![feature(rustc_attrs)]
 #![crate_type = "lib"]
 #![feature(no_core)]

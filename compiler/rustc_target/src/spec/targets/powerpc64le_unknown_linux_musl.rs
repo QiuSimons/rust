@@ -1,5 +1,5 @@
 use crate::spec::{
-    Cc, LinkerFlavor, Lld, StackProbeType, Target, TargetMetadata, TargetOptions, base,
+    Arch, Cc, LinkerFlavor, Lld, StackProbeType, Target, TargetMetadata, TargetOptions, base,
 };
 
 pub(crate) fn target() -> Target {
@@ -16,14 +16,14 @@ pub(crate) fn target() -> Target {
     Target {
         llvm_target: "powerpc64le-unknown-linux-musl".into(),
         metadata: TargetMetadata {
-            description: Some("64-bit PowerPC Linux with musl 1.2.3, Little Endian".into()),
+            description: Some("64-bit PowerPC Linux with musl 1.2.5, Little Endian".into()),
             tier: Some(2),
             host_tools: Some(true),
             std: Some(true),
         },
         pointer_width: 64,
         data_layout: "e-m:e-Fn32-i64:64-i128:128-n32:64-S128-v256:256:256-v512:512:512".into(),
-        arch: "powerpc64".into(),
+        arch: Arch::PowerPC64,
         options: TargetOptions { mcount: "_mcount".into(), ..base },
     }
 }

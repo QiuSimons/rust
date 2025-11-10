@@ -114,8 +114,7 @@ impl PartialEq<Symbol> for Path {
 impl PartialEq<&[Symbol]> for Path {
     #[inline]
     fn eq(&self, names: &&[Symbol]) -> bool {
-        self.segments.len() == names.len()
-            && self.segments.iter().zip(names.iter()).all(|(s1, s2)| s1 == s2)
+        self.segments.iter().eq(*names)
     }
 }
 
@@ -715,6 +714,15 @@ impl Pat {
         }
     }
 
+    /// Strip off all reference patterns (`&`, `&mut`) and return the inner pattern.
+    pub fn peel_refs(&self) -> &Pat {
+        let mut current = self;
+        while let PatKind::Ref(inner, _) = &current.kind {
+            current = inner;
+        }
+        current
+    }
+
     /// Is this a `..` pattern?
     pub fn is_rest(&self) -> bool {
         matches!(self.kind, PatKind::Rest)
@@ -790,14 +798,14 @@ pub struct PatField {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[derive(Encodable, Decodable, HashStable_Generic, Walkable)]
 pub enum ByRef {
-    Yes(Mutability),
+    Yes(Pinnedness, Mutability),
     No,
 }
 
 impl ByRef {
     #[must_use]
     pub fn cap_ref_mutability(mut self, mutbl: Mutability) -> Self {
-        if let ByRef::Yes(old_mutbl) = &mut self {
+        if let ByRef::Yes(_, old_mutbl) = &mut self {
             *old_mutbl = cmp::min(*old_mutbl, mutbl);
         }
         self
@@ -815,20 +823,33 @@ pub struct BindingMode(pub ByRef, pub Mutability);
 
 impl BindingMode {
     pub const NONE: Self = Self(ByRef::No, Mutability::Not);
-    pub const REF: Self = Self(ByRef::Yes(Mutability::Not), Mutability::Not);
+    pub const REF: Self = Self(ByRef::Yes(Pinnedness::Not, Mutability::Not), Mutability::Not);
+    pub const REF_PIN: Self =
+        Self(ByRef::Yes(Pinnedness::Pinned, Mutability::Not), Mutability::Not);
     pub const MUT: Self = Self(ByRef::No, Mutability::Mut);
-    pub const REF_MUT: Self = Self(ByRef::Yes(Mutability::Mut), Mutability::Not);
-    pub const MUT_REF: Self = Self(ByRef::Yes(Mutability::Not), Mutability::Mut);
-    pub const MUT_REF_MUT: Self = Self(ByRef::Yes(Mutability::Mut), Mutability::Mut);
+    pub const REF_MUT: Self = Self(ByRef::Yes(Pinnedness::Not, Mutability::Mut), Mutability::Not);
+    pub const REF_PIN_MUT: Self =
+        Self(ByRef::Yes(Pinnedness::Pinned, Mutability::Mut), Mutability::Not);
+    pub const MUT_REF: Self = Self(ByRef::Yes(Pinnedness::Not, Mutability::Not), Mutability::Mut);
+    pub const MUT_REF_PIN: Self =
+        Self(ByRef::Yes(Pinnedness::Pinned, Mutability::Not), Mutability::Mut);
+    pub const MUT_REF_MUT: Self =
+        Self(ByRef::Yes(Pinnedness::Not, Mutability::Mut), Mutability::Mut);
+    pub const MUT_REF_PIN_MUT: Self =
+        Self(ByRef::Yes(Pinnedness::Pinned, Mutability::Mut), Mutability::Mut);
 
     pub fn prefix_str(self) -> &'static str {
         match self {
             Self::NONE => "",
             Self::REF => "ref ",
+            Self::REF_PIN => "ref pin const ",
             Self::MUT => "mut ",
             Self::REF_MUT => "ref mut ",
+            Self::REF_PIN_MUT => "ref pin mut ",
             Self::MUT_REF => "mut ref ",
+            Self::MUT_REF_PIN => "mut ref pin ",
             Self::MUT_REF_MUT => "mut ref mut ",
+            Self::MUT_REF_PIN_MUT => "mut ref pin mut ",
         }
     }
 }
@@ -870,11 +891,11 @@ pub enum PatKind {
     Struct(Option<Box<QSelf>>, Path, ThinVec<PatField>, PatFieldsRest),
 
     /// A tuple struct/variant pattern (`Variant(x, y, .., z)`).
-    TupleStruct(Option<Box<QSelf>>, Path, ThinVec<Box<Pat>>),
+    TupleStruct(Option<Box<QSelf>>, Path, ThinVec<Pat>),
 
     /// An or-pattern `A | B | C`.
     /// Invariant: `pats.len() >= 2`.
-    Or(ThinVec<Box<Pat>>),
+    Or(ThinVec<Pat>),
 
     /// A possibly qualified path pattern.
     /// Unqualified path patterns `A::B::C` can legally refer to variants, structs, constants
@@ -883,7 +904,7 @@ pub enum PatKind {
     Path(Option<Box<QSelf>>, Path),
 
     /// A tuple pattern (`(a, b)`).
-    Tuple(ThinVec<Box<Pat>>),
+    Tuple(ThinVec<Pat>),
 
     /// A `box` pattern.
     Box(Box<Pat>),
@@ -901,7 +922,7 @@ pub enum PatKind {
     Range(Option<Box<Expr>>, Option<Box<Expr>>, Spanned<RangeEnd>),
 
     /// A slice pattern `[a, b, c]`.
-    Slice(ThinVec<Box<Pat>>),
+    Slice(ThinVec<Pat>),
 
     /// A rest pattern `..`.
     ///
@@ -937,7 +958,7 @@ pub enum PatKind {
 #[derive(Clone, Copy, Encodable, Decodable, Debug, PartialEq, Walkable)]
 pub enum PatFieldsRest {
     /// `module::StructName { field, ..}`
-    Rest,
+    Rest(Span),
     /// `module::StructName { field, syntax error }`
     Recovered(ErrorGuaranteed),
     /// `module::StructName { field }`
@@ -2284,6 +2305,54 @@ pub struct FnSig {
     pub span: Span,
 }
 
+impl FnSig {
+    /// Return a span encompassing the header, or where to insert it if empty.
+    pub fn header_span(&self) -> Span {
+        match self.header.ext {
+            Extern::Implicit(span) | Extern::Explicit(_, span) => {
+                return self.span.with_hi(span.hi());
+            }
+            Extern::None => {}
+        }
+
+        match self.header.safety {
+            Safety::Unsafe(span) | Safety::Safe(span) => return self.span.with_hi(span.hi()),
+            Safety::Default => {}
+        };
+
+        if let Some(coroutine_kind) = self.header.coroutine_kind {
+            return self.span.with_hi(coroutine_kind.span().hi());
+        }
+
+        if let Const::Yes(span) = self.header.constness {
+            return self.span.with_hi(span.hi());
+        }
+
+        self.span.shrink_to_lo()
+    }
+
+    /// The span of the header's safety, or where to insert it if empty.
+    pub fn safety_span(&self) -> Span {
+        match self.header.safety {
+            Safety::Unsafe(span) | Safety::Safe(span) => span,
+            Safety::Default => {
+                // Insert after the `coroutine_kind` if available.
+                if let Some(extern_span) = self.header.ext.span() {
+                    return extern_span.shrink_to_lo();
+                }
+
+                // Insert right at the front of the signature.
+                self.header_span().shrink_to_hi()
+            }
+        }
+    }
+
+    /// The span of the header's extern, or where to insert it if empty.
+    pub fn extern_span(&self) -> Span {
+        self.header.ext.span().unwrap_or(self.safety_span().shrink_to_hi())
+    }
+}
+
 /// A constraint on an associated item.
 ///
 /// ### Examples
@@ -2532,7 +2601,10 @@ pub enum TyPatKind {
     /// A range pattern (e.g., `1...2`, `1..2`, `1..`, `..2`, `1..=2`, `..=2`).
     Range(Option<Box<AnonConst>>, Option<Box<AnonConst>>, Spanned<RangeEnd>),
 
-    Or(ThinVec<Box<TyPat>>),
+    /// A `!null` pattern for raw pointers.
+    NotNull,
+
+    Or(ThinVec<TyPat>),
 
     /// Placeholder for a pattern that wasn't syntactically well formed in some way.
     Err(ErrorGuaranteed),
@@ -3137,7 +3209,7 @@ impl FnRetTy {
 #[derive(Clone, Copy, PartialEq, Encodable, Decodable, Debug, Walkable)]
 pub enum Inline {
     Yes,
-    No,
+    No { had_parse_error: Result<(), ErrorGuaranteed> },
 }
 
 /// Module item kind.
@@ -3147,7 +3219,7 @@ pub enum ModKind {
     /// or with definition outlined to a separate file `mod foo;` and already loaded from it.
     /// The inner span is from the first token past `{` to the last token until `}`,
     /// or from the first to the last token in the loaded file.
-    Loaded(ThinVec<Box<Item>>, Inline, ModSpans, Result<(), ErrorGuaranteed>),
+    Loaded(ThinVec<Box<Item>>, Inline, ModSpans),
     /// Module with definition outlined to a separate file `mod foo;` but not yet loaded from it.
     Unloaded,
 }
@@ -3490,8 +3562,9 @@ impl Item {
             ItemKind::Const(i) => Some(&i.generics),
             ItemKind::Fn(i) => Some(&i.generics),
             ItemKind::TyAlias(i) => Some(&i.generics),
-            ItemKind::TraitAlias(_, generics, _)
-            | ItemKind::Enum(_, generics, _)
+            ItemKind::TraitAlias(i) => Some(&i.generics),
+
+            ItemKind::Enum(_, generics, _)
             | ItemKind::Struct(_, generics, _)
             | ItemKind::Union(_, generics, _) => Some(&generics),
             ItemKind::Trait(i) => Some(&i.generics),
@@ -3526,6 +3599,13 @@ impl Extern {
             None => Extern::Implicit(span),
         }
     }
+
+    pub fn span(self) -> Option<Span> {
+        match self {
+            Extern::None => None,
+            Extern::Implicit(span) | Extern::Explicit(_, span) => Some(span),
+        }
+    }
 }
 
 /// A function header.
@@ -3534,12 +3614,12 @@ impl Extern {
 /// included in this struct (e.g., `async unsafe fn` or `const extern "C" fn`).
 #[derive(Clone, Copy, Encodable, Decodable, Debug, Walkable)]
 pub struct FnHeader {
-    /// Whether this is `unsafe`, or has a default safety.
-    pub safety: Safety,
-    /// Whether this is `async`, `gen`, or nothing.
-    pub coroutine_kind: Option<CoroutineKind>,
     /// The `const` keyword, if any
     pub constness: Const,
+    /// Whether this is `async`, `gen`, or nothing.
+    pub coroutine_kind: Option<CoroutineKind>,
+    /// Whether this is `unsafe`, or has a default safety.
+    pub safety: Safety,
     /// The `extern` keyword and corresponding ABI string, if any.
     pub ext: Extern,
 }
@@ -3552,38 +3632,6 @@ impl FnHeader {
             || coroutine_kind.is_some()
             || matches!(constness, Const::Yes(_))
             || !matches!(ext, Extern::None)
-    }
-
-    /// Return a span encompassing the header, or none if all options are default.
-    pub fn span(&self) -> Option<Span> {
-        fn append(a: &mut Option<Span>, b: Span) {
-            *a = match a {
-                None => Some(b),
-                Some(x) => Some(x.to(b)),
-            }
-        }
-
-        let mut full_span = None;
-
-        match self.safety {
-            Safety::Unsafe(span) | Safety::Safe(span) => append(&mut full_span, span),
-            Safety::Default => {}
-        };
-
-        if let Some(coroutine_kind) = self.coroutine_kind {
-            append(&mut full_span, coroutine_kind.span());
-        }
-
-        if let Const::Yes(span) = self.constness {
-            append(&mut full_span, span);
-        }
-
-        match self.ext {
-            Extern::Implicit(span) | Extern::Explicit(_, span) => append(&mut full_span, span),
-            Extern::None => {}
-        }
-
-        full_span
     }
 }
 
@@ -3599,6 +3647,15 @@ impl Default for FnHeader {
 }
 
 #[derive(Clone, Encodable, Decodable, Debug, Walkable)]
+pub struct TraitAlias {
+    pub constness: Const,
+    pub ident: Ident,
+    pub generics: Generics,
+    #[visitable(extra = BoundKind::Bound)]
+    pub bounds: GenericBounds,
+}
+
+#[derive(Clone, Encodable, Decodable, Debug, Walkable)]
 pub struct Trait {
     pub constness: Const,
     pub safety: Safety,
@@ -3611,49 +3668,26 @@ pub struct Trait {
     pub items: ThinVec<Box<AssocItem>>,
 }
 
-/// The location of a where clause on a `TyAlias` (`Span`) and whether there was
-/// a `where` keyword (`bool`). This is split out from `WhereClause`, since there
-/// are two locations for where clause on type aliases, but their predicates
-/// are concatenated together.
-///
-/// Take this example:
-/// ```ignore (only-for-syntax-highlight)
-/// trait Foo {
-///   type Assoc<'a, 'b> where Self: 'a, Self: 'b;
-/// }
-/// impl Foo for () {
-///   type Assoc<'a, 'b> where Self: 'a = () where Self: 'b;
-///   //                 ^^^^^^^^^^^^^^ first where clause
-///   //                                     ^^^^^^^^^^^^^^ second where clause
-/// }
-/// ```
-///
-/// If there is no where clause, then this is `false` with `DUMMY_SP`.
-#[derive(Copy, Clone, Encodable, Decodable, Debug, Default, Walkable)]
-pub struct TyAliasWhereClause {
-    pub has_where_token: bool,
-    pub span: Span,
-}
-
-/// The span information for the two where clauses on a `TyAlias`.
-#[derive(Copy, Clone, Encodable, Decodable, Debug, Default, Walkable)]
-pub struct TyAliasWhereClauses {
-    /// Before the equals sign.
-    pub before: TyAliasWhereClause,
-    /// After the equals sign.
-    pub after: TyAliasWhereClause,
-    /// The index in `TyAlias.generics.where_clause.predicates` that would split
-    /// into predicates from the where clause before the equals sign and the ones
-    /// from the where clause after the equals sign.
-    pub split: usize,
-}
-
 #[derive(Clone, Encodable, Decodable, Debug, Walkable)]
 pub struct TyAlias {
     pub defaultness: Defaultness,
     pub ident: Ident,
     pub generics: Generics,
-    pub where_clauses: TyAliasWhereClauses,
+    /// There are two locations for where clause on type aliases. This represents the second
+    /// where clause, before the semicolon. The first where clause is stored inside `generics`.
+    ///
+    /// Take this example:
+    /// ```ignore (only-for-syntax-highlight)
+    /// trait Foo {
+    ///   type Assoc<'a, 'b> where Self: 'a, Self: 'b;
+    /// }
+    /// impl Foo for () {
+    ///   type Assoc<'a, 'b> where Self: 'a = () where Self: 'b;
+    ///   //                 ^^^^^^^^^^^^^^ before where clause
+    ///   //                                     ^^^^^^^^^^^^^^ after where clause
+    /// }
+    /// ```
+    pub after_where_clause: WhereClause,
     #[visitable(extra = BoundKind::Bound)]
     pub bounds: GenericBounds,
     pub ty: Option<Box<Ty>>,
@@ -3678,6 +3712,9 @@ pub struct TraitImplHeader {
 
 #[derive(Clone, Encodable, Decodable, Debug, Default, Walkable)]
 pub struct FnContract {
+    /// Declarations of variables accessible both in the `requires` and
+    /// `ensures` clauses.
+    pub declarations: ThinVec<Stmt>,
     pub requires: Option<Box<Expr>>,
     pub ensures: Option<Box<Expr>>,
 }
@@ -3731,8 +3768,27 @@ pub struct ConstItem {
     pub ident: Ident,
     pub generics: Generics,
     pub ty: Box<Ty>,
-    pub expr: Option<Box<Expr>>,
+    pub rhs: Option<ConstItemRhs>,
     pub define_opaque: Option<ThinVec<(NodeId, Path)>>,
+}
+
+#[derive(Clone, Encodable, Decodable, Debug, Walkable)]
+pub enum ConstItemRhs {
+    TypeConst(AnonConst),
+    Body(Box<Expr>),
+}
+
+impl ConstItemRhs {
+    pub fn span(&self) -> Span {
+        self.expr().span
+    }
+
+    pub fn expr(&self) -> &Expr {
+        match self {
+            ConstItemRhs::TypeConst(anon_const) => &anon_const.value,
+            ConstItemRhs::Body(expr) => expr,
+        }
+    }
 }
 
 // Adding a new variant? Please update `test_item` in `tests/ui/macros/stringify.rs`.
@@ -3793,7 +3849,7 @@ pub enum ItemKind {
     /// Trait alias.
     ///
     /// E.g., `trait Foo = Bar + Quux;`.
-    TraitAlias(Ident, Generics, GenericBounds),
+    TraitAlias(Box<TraitAlias>),
     /// An implementation.
     ///
     /// E.g., `impl<A> Foo<A> { .. }` or `impl<A> Trait for Foo<A> { .. }`.
@@ -3826,7 +3882,7 @@ impl ItemKind {
             | ItemKind::Struct(ident, ..)
             | ItemKind::Union(ident, ..)
             | ItemKind::Trait(box Trait { ident, .. })
-            | ItemKind::TraitAlias(ident, ..)
+            | ItemKind::TraitAlias(box TraitAlias { ident, .. })
             | ItemKind::MacroDef(ident, _)
             | ItemKind::Delegation(box Delegation { ident, .. }) => Some(ident),
 
@@ -3883,7 +3939,7 @@ impl ItemKind {
             | Self::Struct(_, generics, _)
             | Self::Union(_, generics, _)
             | Self::Trait(box Trait { generics, .. })
-            | Self::TraitAlias(_, generics, _)
+            | Self::TraitAlias(box TraitAlias { generics, .. })
             | Self::Impl(Impl { generics, .. }) => Some(generics),
             _ => None,
         }
@@ -4045,14 +4101,14 @@ mod size_asserts {
     static_assert_size!(GenericBound, 88);
     static_assert_size!(Generics, 40);
     static_assert_size!(Impl, 64);
-    static_assert_size!(Item, 144);
-    static_assert_size!(ItemKind, 80);
+    static_assert_size!(Item, 136);
+    static_assert_size!(ItemKind, 72);
     static_assert_size!(LitKind, 24);
     static_assert_size!(Local, 96);
     static_assert_size!(MetaItemLit, 40);
     static_assert_size!(Param, 40);
-    static_assert_size!(Pat, 72);
-    static_assert_size!(PatKind, 48);
+    static_assert_size!(Pat, 80);
+    static_assert_size!(PatKind, 56);
     static_assert_size!(Path, 24);
     static_assert_size!(PathSegment, 24);
     static_assert_size!(Stmt, 32);

@@ -1,4 +1,4 @@
-//@ add-core-stubs
+//@ add-minicore
 //@ revisions: aarch64 x86_64
 //@ [aarch64] compile-flags: --target aarch64-unknown-none
 //@ [aarch64] needs-llvm-components: aarch64
@@ -15,8 +15,9 @@ use minicore::*;
 
 struct Thing;
 trait MyTrait {
+    // NOTE: this test assumes that this trait is dyn-compatible.
     #[unsafe(naked)]
-    extern "C" fn my_naked_function() {
+    extern "C" fn my_naked_function(&self) {
         // the real function is defined
         // CHECK: .globl
         // CHECK-SAME: my_naked_function
@@ -34,13 +35,13 @@ impl MyTrait for Thing {}
 #[unsafe(no_mangle)]
 pub fn main() {
     // Trick the compiler into generating an indirect call.
-    const F: extern "C" fn() = Thing::my_naked_function;
+    const F: extern "C" fn(&Thing) = Thing::my_naked_function;
 
     // main calls the shim function
     // CHECK: call void
     // CHECK-SAME: my_naked_function
     // CHECK-SAME: reify.shim.fnptr
-    (F)();
+    (F)(&Thing);
 }
 
 // CHECK: declare !kcfi_type

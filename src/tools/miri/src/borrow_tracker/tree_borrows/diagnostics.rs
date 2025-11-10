@@ -4,10 +4,10 @@ use std::ops::Range;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_span::{Span, SpanData};
 
-use crate::borrow_tracker::ProtectorKind;
 use crate::borrow_tracker::tree_borrows::perms::{PermTransition, Permission};
 use crate::borrow_tracker::tree_borrows::tree::LocationState;
 use crate::borrow_tracker::tree_borrows::unimap::UniIndex;
+use crate::borrow_tracker::{AccessKind, ProtectorKind};
 use crate::*;
 
 /// Cause of an access: either a real access or one
@@ -244,8 +244,8 @@ pub(super) enum TransitionError {
     ChildAccessForbidden(Permission),
     /// A protector was triggered due to an invalid transition that loses
     /// too much permissions.
-    /// For example, if a protected tag goes from `Active` to `Disabled` due
-    /// to a foreign write this will produce a `ProtectedDisabled(Active)`.
+    /// For example, if a protected tag goes from `Unique` to `Disabled` due
+    /// to a foreign write this will produce a `ProtectedDisabled(Unique)`.
     /// This kind of error can only occur on foreign accesses.
     ProtectedDisabled(Permission),
     /// Cannot deallocate because some tag in the allocation is strongly protected.
@@ -504,7 +504,7 @@ impl DisplayFmt {
         if let Some(perm) = perm {
             format!(
                 "{ac}{st}",
-                ac = if perm.is_accessed() { self.accessed.yes } else { self.accessed.no },
+                ac = if perm.accessed() { self.accessed.yes } else { self.accessed.no },
                 st = perm.permission().short_name(),
             )
         } else {

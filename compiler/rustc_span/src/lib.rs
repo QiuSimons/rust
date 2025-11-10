@@ -17,8 +17,7 @@
 
 // tidy-alphabetical-start
 #![allow(internal_features)]
-#![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
-#![doc(rust_logo)]
+#![cfg_attr(target_arch = "loongarch64", feature(stdarch_loongarch))]
 #![feature(array_windows)]
 #![feature(cfg_select)]
 #![feature(core_io_borrowed_buf)]
@@ -26,9 +25,7 @@
 #![feature(map_try_insert)]
 #![feature(negative_impls)]
 #![feature(read_buf)]
-#![feature(round_char_boundary)]
 #![feature(rustc_attrs)]
-#![feature(rustdoc_internals)]
 // tidy-alphabetical-end
 
 // The code produced by the `Encodable`/`Decodable` derive macros refer to
@@ -710,8 +707,8 @@ impl Span {
         if !ctxt.is_root() { ctxt.outer_expn_data().call_site.source_callsite() } else { self }
     }
 
-    /// The `Span` for the tokens in the previous macro expansion from which `self` was generated,
-    /// if any.
+    /// Returns the call-site span of the last macro expansion which produced this `Span`.
+    /// (see [`ExpnData::call_site`]). Returns `None` if this is not an expansion.
     pub fn parent_callsite(self) -> Option<Span> {
         let ctxt = self.ctxt();
         (!ctxt.is_root()).then(|| ctxt.outer_expn_data().call_site)

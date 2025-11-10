@@ -23,7 +23,7 @@ use crate::{
         BigModItem, Const, Enum, ExternBlock, ExternCrate, FieldsShape, Function, Impl,
         ImportAlias, Interned, ItemTree, ItemTreeAstId, Macro2, MacroCall, MacroRules, Mod,
         ModItemId, ModKind, ModPath, RawAttrs, RawVisibility, RawVisibilityId, SmallModItem,
-        Static, Struct, StructKind, Trait, TraitAlias, TypeAlias, Union, Use, UseTree, UseTreeKind,
+        Static, Struct, StructKind, Trait, TypeAlias, Union, Use, UseTree, UseTreeKind,
         VisibilityExplicitness,
     },
 };
@@ -134,7 +134,6 @@ impl<'a> Ctx<'a> {
             ast::Item::Const(ast) => self.lower_const(ast).into(),
             ast::Item::Module(ast) => self.lower_module(ast)?.into(),
             ast::Item::Trait(ast) => self.lower_trait(ast)?.into(),
-            ast::Item::TraitAlias(ast) => self.lower_trait_alias(ast)?.into(),
             ast::Item::Impl(ast) => self.lower_impl(ast).into(),
             ast::Item::Use(ast) => self.lower_use(ast)?.into(),
             ast::Item::ExternCrate(ast) => self.lower_extern_crate(ast)?.into(),
@@ -267,19 +266,6 @@ impl<'a> Ctx<'a> {
         Some(ast_id)
     }
 
-    fn lower_trait_alias(
-        &mut self,
-        trait_alias_def: &ast::TraitAlias,
-    ) -> Option<ItemTreeAstId<TraitAlias>> {
-        let name = trait_alias_def.name()?.as_name();
-        let visibility = self.lower_visibility(trait_alias_def);
-        let ast_id = self.source_ast_id_map.ast_id(trait_alias_def);
-
-        let alias = TraitAlias { name, visibility };
-        self.tree.small_data.insert(ast_id.upcast(), SmallModItem::TraitAlias(alias));
-        Some(ast_id)
-    }
-
     fn lower_impl(&mut self, impl_def: &ast::Impl) -> ItemTreeAstId<Impl> {
         let ast_id = self.source_ast_id_map.ast_id(impl_def);
         // Note that trait impls don't get implicit `Self` unlike traits, because here they are a
@@ -384,18 +370,13 @@ impl<'a> Ctx<'a> {
         });
         match &vis {
             RawVisibility::Public => RawVisibilityId::PUB,
-            RawVisibility::Module(path, explicitness) if path.segments().is_empty() => {
-                match (path.kind, explicitness) {
-                    (PathKind::SELF, VisibilityExplicitness::Explicit) => {
-                        RawVisibilityId::PRIV_EXPLICIT
-                    }
-                    (PathKind::SELF, VisibilityExplicitness::Implicit) => {
-                        RawVisibilityId::PRIV_IMPLICIT
-                    }
-                    (PathKind::Crate, _) => RawVisibilityId::PUB_CRATE,
-                    _ => RawVisibilityId(self.visibilities.insert_full(vis).0 as u32),
-                }
+            RawVisibility::PubSelf(VisibilityExplicitness::Explicit) => {
+                RawVisibilityId::PRIV_EXPLICIT
             }
+            RawVisibility::PubSelf(VisibilityExplicitness::Implicit) => {
+                RawVisibilityId::PRIV_IMPLICIT
+            }
+            RawVisibility::PubCrate => RawVisibilityId::PUB_CRATE,
             _ => RawVisibilityId(self.visibilities.insert_full(vis).0 as u32),
         }
     }
@@ -480,10 +461,7 @@ pub(crate) fn lower_use_tree(
 }
 
 fn private_vis() -> RawVisibility {
-    RawVisibility::Module(
-        Interned::new(ModPath::from_kind(PathKind::SELF)),
-        VisibilityExplicitness::Implicit,
-    )
+    RawVisibility::PubSelf(VisibilityExplicitness::Implicit)
 }
 
 pub(crate) fn visibility_from_ast(
@@ -500,9 +478,11 @@ pub(crate) fn visibility_from_ast(
                 Some(path) => path,
             }
         }
-        ast::VisibilityKind::PubCrate => ModPath::from_kind(PathKind::Crate),
+        ast::VisibilityKind::PubCrate => return RawVisibility::PubCrate,
         ast::VisibilityKind::PubSuper => ModPath::from_kind(PathKind::Super(1)),
-        ast::VisibilityKind::PubSelf => ModPath::from_kind(PathKind::SELF),
+        ast::VisibilityKind::PubSelf => {
+            return RawVisibility::PubSelf(VisibilityExplicitness::Explicit);
+        }
         ast::VisibilityKind::Pub => return RawVisibility::Public,
     };
     RawVisibility::Module(Interned::new(path), VisibilityExplicitness::Explicit)

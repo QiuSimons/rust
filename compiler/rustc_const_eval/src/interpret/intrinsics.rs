@@ -2,6 +2,8 @@
 //! looking at their MIR. Intrinsics/functions supported here are shared by CTFE
 //! and miri.
 
+mod simd;
+
 use std::assert_matches::assert_matches;
 
 use rustc_abi::{FieldIdx, HasDataLayout, Size};
@@ -9,8 +11,8 @@ use rustc_apfloat::ieee::{Double, Half, Quad, Single};
 use rustc_middle::mir::interpret::{CTFE_ALLOC_SALT, read_target_uint, write_target_uint};
 use rustc_middle::mir::{self, BinOp, ConstValue, NonDivergingIntrinsic};
 use rustc_middle::ty::layout::TyAndLayout;
-use rustc_middle::ty::{Ty, TyCtxt};
-use rustc_middle::{bug, ty};
+use rustc_middle::ty::{FloatTy, Ty, TyCtxt};
+use rustc_middle::{bug, span_bug, ty};
 use rustc_span::{Symbol, sym};
 use tracing::trace;
 
@@ -22,6 +24,35 @@ use super::{
     throw_ub_custom, throw_ub_format,
 };
 use crate::fluent_generated as fluent;
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum MulAddType {
+    /// Used with `fma` and `simd_fma`, always uses fused-multiply-add
+    Fused,
+    /// Used with `fmuladd` and `simd_relaxed_fma`, nondeterministically determines whether to use
+    /// fma or simple multiply-add
+    Nondeterministic,
+}
+
+#[derive(Copy, Clone)]
+pub(crate) enum MinMax {
+    /// The IEEE `Minimum` operation - see `f32::minimum` etc
+    /// In particular, `-0.0` is considered smaller than `+0.0` and
+    /// if either input is NaN, the result is NaN.
+    Minimum,
+    /// The IEEE `MinNum` operation - see `f32::min` etc
+    /// In particular, if the inputs are `-0.0` and `+0.0`, the result is non-deterministic,
+    /// and is one argument is NaN, the other one is returned.
+    MinNum,
+    /// The IEEE `Maximum` operation - see `f32::maximum` etc
+    /// In particular, `-0.0` is considered smaller than `+0.0` and
+    /// if either input is NaN, the result is NaN.
+    Maximum,
+    /// The IEEE `MaxNum` operation - see `f32::max` etc
+    /// In particular, if the inputs are `-0.0` and `+0.0`, the result is non-deterministic,
+    /// and is one argument is NaN, the other one is returned.
+    MaxNum,
+}
 
 /// Directly returns an `Allocation` containing an absolute path representation of the given type.
 pub(crate) fn alloc_type_name<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> (AllocId, u64) {
@@ -121,6 +152,11 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
     ) -> InterpResult<'tcx, bool> {
         let instance_args = instance.args;
         let intrinsic_name = self.tcx.item_name(instance.def_id());
+
+        if intrinsic_name.as_str().starts_with("simd_") {
+            return self.eval_simd_intrinsic(intrinsic_name, instance_args, args, dest, ret);
+        }
+
         let tcx = self.tcx.tcx;
 
         match intrinsic_name {
@@ -148,6 +184,24 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
                 let a_ty = self.read_type_id(&args[0])?;
                 let b_ty = self.read_type_id(&args[1])?;
                 self.write_scalar(Scalar::from_bool(a_ty == b_ty), dest)?;
+            }
+            sym::size_of => {
+                let tp_ty = instance.args.type_at(0);
+                let layout = self.layout_of(tp_ty)?;
+                if !layout.is_sized() {
+                    span_bug!(self.cur_span(), "unsized type for `size_of`");
+                }
+                let val = layout.size.bytes();
+                self.write_scalar(Scalar::from_target_usize(val, self), dest)?;
+            }
+            sym::align_of => {
+                let tp_ty = instance.args.type_at(0);
+                let layout = self.layout_of(tp_ty)?;
+                if !layout.is_sized() {
+                    span_bug!(self.cur_span(), "unsized type for `align_of`");
+                }
+                let val = layout.align.bytes();
+                self.write_scalar(Scalar::from_target_usize(val, self), dest)?;
             }
             sym::variant_count => {
                 let tp_ty = instance.args.type_at(0);
@@ -181,7 +235,7 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
                     | ty::Ref(_, _, _)
                     | ty::FnDef(_, _)
                     | ty::FnPtr(..)
-                    | ty::Dynamic(_, _, _)
+                    | ty::Dynamic(_, _)
                     | ty::Closure(_, _)
                     | ty::CoroutineClosure(_, _)
                     | ty::Coroutine(_, _)
@@ -454,37 +508,6 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
                 self.exact_div(&val, &size, dest)?;
             }
 
-            sym::simd_insert => {
-                let index = u64::from(self.read_scalar(&args[1])?.to_u32()?);
-                let elem = &args[2];
-                let (input, input_len) = self.project_to_simd(&args[0])?;
-                let (dest, dest_len) = self.project_to_simd(dest)?;
-                assert_eq!(input_len, dest_len, "Return vector length must match input length");
-                // Bounds are not checked by typeck so we have to do it ourselves.
-                if index >= input_len {
-                    throw_ub_format!(
-                        "`simd_insert` index {index} is out-of-bounds of vector with length {input_len}"
-                    );
-                }
-
-                for i in 0..dest_len {
-                    let place = self.project_index(&dest, i)?;
-                    let value =
-                        if i == index { elem.clone() } else { self.project_index(&input, i)? };
-                    self.copy_op(&value, &place)?;
-                }
-            }
-            sym::simd_extract => {
-                let index = u64::from(self.read_scalar(&args[1])?.to_u32()?);
-                let (input, input_len) = self.project_to_simd(&args[0])?;
-                // Bounds are not checked by typeck so we have to do it ourselves.
-                if index >= input_len {
-                    throw_ub_format!(
-                        "`simd_extract` index {index} is out-of-bounds of vector with length {input_len}"
-                    );
-                }
-                self.copy_op(&self.project_index(&input, index)?, dest)?;
-            }
             sym::black_box => {
                 // These just return their argument
                 self.copy_op(&args[0], dest)?;
@@ -510,25 +533,33 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
                 self.write_scalar(Scalar::from_target_usize(align.bytes(), self), dest)?;
             }
 
-            sym::minnumf16 => self.float_min_intrinsic::<Half>(args, dest)?,
-            sym::minnumf32 => self.float_min_intrinsic::<Single>(args, dest)?,
-            sym::minnumf64 => self.float_min_intrinsic::<Double>(args, dest)?,
-            sym::minnumf128 => self.float_min_intrinsic::<Quad>(args, dest)?,
+            sym::minnumf16 => self.float_minmax_intrinsic::<Half>(args, MinMax::MinNum, dest)?,
+            sym::minnumf32 => self.float_minmax_intrinsic::<Single>(args, MinMax::MinNum, dest)?,
+            sym::minnumf64 => self.float_minmax_intrinsic::<Double>(args, MinMax::MinNum, dest)?,
+            sym::minnumf128 => self.float_minmax_intrinsic::<Quad>(args, MinMax::MinNum, dest)?,
 
-            sym::minimumf16 => self.float_minimum_intrinsic::<Half>(args, dest)?,
-            sym::minimumf32 => self.float_minimum_intrinsic::<Single>(args, dest)?,
-            sym::minimumf64 => self.float_minimum_intrinsic::<Double>(args, dest)?,
-            sym::minimumf128 => self.float_minimum_intrinsic::<Quad>(args, dest)?,
+            sym::minimumf16 => self.float_minmax_intrinsic::<Half>(args, MinMax::Minimum, dest)?,
+            sym::minimumf32 => {
+                self.float_minmax_intrinsic::<Single>(args, MinMax::Minimum, dest)?
+            }
+            sym::minimumf64 => {
+                self.float_minmax_intrinsic::<Double>(args, MinMax::Minimum, dest)?
+            }
+            sym::minimumf128 => self.float_minmax_intrinsic::<Quad>(args, MinMax::Minimum, dest)?,
 
-            sym::maxnumf16 => self.float_max_intrinsic::<Half>(args, dest)?,
-            sym::maxnumf32 => self.float_max_intrinsic::<Single>(args, dest)?,
-            sym::maxnumf64 => self.float_max_intrinsic::<Double>(args, dest)?,
-            sym::maxnumf128 => self.float_max_intrinsic::<Quad>(args, dest)?,
+            sym::maxnumf16 => self.float_minmax_intrinsic::<Half>(args, MinMax::MaxNum, dest)?,
+            sym::maxnumf32 => self.float_minmax_intrinsic::<Single>(args, MinMax::MaxNum, dest)?,
+            sym::maxnumf64 => self.float_minmax_intrinsic::<Double>(args, MinMax::MaxNum, dest)?,
+            sym::maxnumf128 => self.float_minmax_intrinsic::<Quad>(args, MinMax::MaxNum, dest)?,
 
-            sym::maximumf16 => self.float_maximum_intrinsic::<Half>(args, dest)?,
-            sym::maximumf32 => self.float_maximum_intrinsic::<Single>(args, dest)?,
-            sym::maximumf64 => self.float_maximum_intrinsic::<Double>(args, dest)?,
-            sym::maximumf128 => self.float_maximum_intrinsic::<Quad>(args, dest)?,
+            sym::maximumf16 => self.float_minmax_intrinsic::<Half>(args, MinMax::Maximum, dest)?,
+            sym::maximumf32 => {
+                self.float_minmax_intrinsic::<Single>(args, MinMax::Maximum, dest)?
+            }
+            sym::maximumf64 => {
+                self.float_minmax_intrinsic::<Double>(args, MinMax::Maximum, dest)?
+            }
+            sym::maximumf128 => self.float_minmax_intrinsic::<Quad>(args, MinMax::Maximum, dest)?,
 
             sym::copysignf16 => self.float_copysign_intrinsic::<Half>(args, dest)?,
             sym::copysignf32 => self.float_copysign_intrinsic::<Single>(args, dest)?,
@@ -636,6 +667,22 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
                 dest,
                 rustc_apfloat::Round::NearestTiesToEven,
             )?,
+            sym::fmaf16 => self.float_muladd_intrinsic::<Half>(args, dest, MulAddType::Fused)?,
+            sym::fmaf32 => self.float_muladd_intrinsic::<Single>(args, dest, MulAddType::Fused)?,
+            sym::fmaf64 => self.float_muladd_intrinsic::<Double>(args, dest, MulAddType::Fused)?,
+            sym::fmaf128 => self.float_muladd_intrinsic::<Quad>(args, dest, MulAddType::Fused)?,
+            sym::fmuladdf16 => {
+                self.float_muladd_intrinsic::<Half>(args, dest, MulAddType::Nondeterministic)?
+            }
+            sym::fmuladdf32 => {
+                self.float_muladd_intrinsic::<Single>(args, dest, MulAddType::Nondeterministic)?
+            }
+            sym::fmuladdf64 => {
+                self.float_muladd_intrinsic::<Double>(args, dest, MulAddType::Nondeterministic)?
+            }
+            sym::fmuladdf128 => {
+                self.float_muladd_intrinsic::<Quad>(args, dest, MulAddType::Nondeterministic)?
+            }
 
             // Unsupported intrinsic: skip the return_to_block below.
             _ => return interp_ok(false),
@@ -870,7 +917,7 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
             .compute_size_in_bytes(layout.size, count)
             .ok_or_else(|| err_ub_custom!(fluent::const_eval_size_overflow, name = name))?;
 
-        let bytes = std::iter::repeat(byte).take(len.bytes_usize());
+        let bytes = std::iter::repeat_n(byte, len.bytes_usize());
         self.write_bytes_ptr(dst, bytes)
     }
 
@@ -917,76 +964,45 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
         interp_ok(Scalar::from_bool(lhs_bytes == rhs_bytes))
     }
 
-    fn float_min_intrinsic<F>(
-        &mut self,
-        args: &[OpTy<'tcx, M::Provenance>],
-        dest: &PlaceTy<'tcx, M::Provenance>,
-    ) -> InterpResult<'tcx, ()>
+    fn float_minmax<F>(
+        &self,
+        a: Scalar<M::Provenance>,
+        b: Scalar<M::Provenance>,
+        op: MinMax,
+    ) -> InterpResult<'tcx, Scalar<M::Provenance>>
     where
         F: rustc_apfloat::Float + rustc_apfloat::FloatConvert<F> + Into<Scalar<M::Provenance>>,
     {
-        let a: F = self.read_scalar(&args[0])?.to_float()?;
-        let b: F = self.read_scalar(&args[1])?.to_float()?;
-        let res = if a == b {
+        let a: F = a.to_float()?;
+        let b: F = b.to_float()?;
+        let res = if matches!(op, MinMax::MinNum | MinMax::MaxNum) && a == b {
             // They are definitely not NaN (those are never equal), but they could be `+0` and `-0`.
             // Let the machine decide which one to return.
             M::equal_float_min_max(self, a, b)
         } else {
-            self.adjust_nan(a.min(b), &[a, b])
+            let result = match op {
+                MinMax::Minimum => a.minimum(b),
+                MinMax::MinNum => a.min(b),
+                MinMax::Maximum => a.maximum(b),
+                MinMax::MaxNum => a.max(b),
+            };
+            self.adjust_nan(result, &[a, b])
         };
-        self.write_scalar(res, dest)?;
-        interp_ok(())
+
+        interp_ok(res.into())
     }
 
-    fn float_max_intrinsic<F>(
+    fn float_minmax_intrinsic<F>(
         &mut self,
         args: &[OpTy<'tcx, M::Provenance>],
+        op: MinMax,
         dest: &PlaceTy<'tcx, M::Provenance>,
     ) -> InterpResult<'tcx, ()>
     where
         F: rustc_apfloat::Float + rustc_apfloat::FloatConvert<F> + Into<Scalar<M::Provenance>>,
     {
-        let a: F = self.read_scalar(&args[0])?.to_float()?;
-        let b: F = self.read_scalar(&args[1])?.to_float()?;
-        let res = if a == b {
-            // They are definitely not NaN (those are never equal), but they could be `+0` and `-0`.
-            // Let the machine decide which one to return.
-            M::equal_float_min_max(self, a, b)
-        } else {
-            self.adjust_nan(a.max(b), &[a, b])
-        };
-        self.write_scalar(res, dest)?;
-        interp_ok(())
-    }
-
-    fn float_minimum_intrinsic<F>(
-        &mut self,
-        args: &[OpTy<'tcx, M::Provenance>],
-        dest: &PlaceTy<'tcx, M::Provenance>,
-    ) -> InterpResult<'tcx, ()>
-    where
-        F: rustc_apfloat::Float + rustc_apfloat::FloatConvert<F> + Into<Scalar<M::Provenance>>,
-    {
-        let a: F = self.read_scalar(&args[0])?.to_float()?;
-        let b: F = self.read_scalar(&args[1])?.to_float()?;
-        let res = a.minimum(b);
-        let res = self.adjust_nan(res, &[a, b]);
-        self.write_scalar(res, dest)?;
-        interp_ok(())
-    }
-
-    fn float_maximum_intrinsic<F>(
-        &mut self,
-        args: &[OpTy<'tcx, M::Provenance>],
-        dest: &PlaceTy<'tcx, M::Provenance>,
-    ) -> InterpResult<'tcx, ()>
-    where
-        F: rustc_apfloat::Float + rustc_apfloat::FloatConvert<F> + Into<Scalar<M::Provenance>>,
-    {
-        let a: F = self.read_scalar(&args[0])?.to_float()?;
-        let b: F = self.read_scalar(&args[1])?.to_float()?;
-        let res = a.maximum(b);
-        let res = self.adjust_nan(res, &[a, b]);
+        let res =
+            self.float_minmax::<F>(self.read_scalar(&args[0])?, self.read_scalar(&args[1])?, op)?;
         self.write_scalar(res, dest)?;
         interp_ok(())
     }
@@ -1020,6 +1036,20 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
         interp_ok(())
     }
 
+    fn float_round<F>(
+        &mut self,
+        x: Scalar<M::Provenance>,
+        mode: rustc_apfloat::Round,
+    ) -> InterpResult<'tcx, Scalar<M::Provenance>>
+    where
+        F: rustc_apfloat::Float + rustc_apfloat::FloatConvert<F> + Into<Scalar<M::Provenance>>,
+    {
+        let x: F = x.to_float()?;
+        let res = x.round_to_integral(mode).value;
+        let res = self.adjust_nan(res, &[x]);
+        interp_ok(res.into())
+    }
+
     fn float_round_intrinsic<F>(
         &mut self,
         args: &[OpTy<'tcx, M::Provenance>],
@@ -1029,10 +1059,109 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
     where
         F: rustc_apfloat::Float + rustc_apfloat::FloatConvert<F> + Into<Scalar<M::Provenance>>,
     {
-        let x: F = self.read_scalar(&args[0])?.to_float()?;
-        let res = x.round_to_integral(mode).value;
-        let res = self.adjust_nan(res, &[x]);
+        let res = self.float_round::<F>(self.read_scalar(&args[0])?, mode)?;
         self.write_scalar(res, dest)?;
         interp_ok(())
+    }
+
+    fn float_muladd<F>(
+        &self,
+        a: Scalar<M::Provenance>,
+        b: Scalar<M::Provenance>,
+        c: Scalar<M::Provenance>,
+        typ: MulAddType,
+    ) -> InterpResult<'tcx, Scalar<M::Provenance>>
+    where
+        F: rustc_apfloat::Float + rustc_apfloat::FloatConvert<F> + Into<Scalar<M::Provenance>>,
+    {
+        let a: F = a.to_float()?;
+        let b: F = b.to_float()?;
+        let c: F = c.to_float()?;
+
+        let fuse = typ == MulAddType::Fused || M::float_fuse_mul_add(self);
+
+        let res = if fuse { a.mul_add(b, c).value } else { ((a * b).value + c).value };
+        let res = self.adjust_nan(res, &[a, b, c]);
+        interp_ok(res.into())
+    }
+
+    fn float_muladd_intrinsic<F>(
+        &mut self,
+        args: &[OpTy<'tcx, M::Provenance>],
+        dest: &PlaceTy<'tcx, M::Provenance>,
+        typ: MulAddType,
+    ) -> InterpResult<'tcx, ()>
+    where
+        F: rustc_apfloat::Float + rustc_apfloat::FloatConvert<F> + Into<Scalar<M::Provenance>>,
+    {
+        let a = self.read_scalar(&args[0])?;
+        let b = self.read_scalar(&args[1])?;
+        let c = self.read_scalar(&args[2])?;
+
+        let res = self.float_muladd::<F>(a, b, c, typ)?;
+        self.write_scalar(res, dest)?;
+        interp_ok(())
+    }
+
+    /// Converts `src` from floating point to integer type `dest_ty`
+    /// after rounding with mode `round`.
+    /// Returns `None` if `f` is NaN or out of range.
+    pub fn float_to_int_checked(
+        &self,
+        src: &ImmTy<'tcx, M::Provenance>,
+        cast_to: TyAndLayout<'tcx>,
+        round: rustc_apfloat::Round,
+    ) -> InterpResult<'tcx, Option<ImmTy<'tcx, M::Provenance>>> {
+        fn float_to_int_inner<'tcx, F: rustc_apfloat::Float, M: Machine<'tcx>>(
+            ecx: &InterpCx<'tcx, M>,
+            src: F,
+            cast_to: TyAndLayout<'tcx>,
+            round: rustc_apfloat::Round,
+        ) -> (Scalar<M::Provenance>, rustc_apfloat::Status) {
+            let int_size = cast_to.layout.size;
+            match cast_to.ty.kind() {
+                // Unsigned
+                ty::Uint(_) => {
+                    let res = src.to_u128_r(int_size.bits_usize(), round, &mut false);
+                    (Scalar::from_uint(res.value, int_size), res.status)
+                }
+                // Signed
+                ty::Int(_) => {
+                    let res = src.to_i128_r(int_size.bits_usize(), round, &mut false);
+                    (Scalar::from_int(res.value, int_size), res.status)
+                }
+                // Nothing else
+                _ => span_bug!(
+                    ecx.cur_span(),
+                    "attempted float-to-int conversion with non-int output type {}",
+                    cast_to.ty,
+                ),
+            }
+        }
+
+        let ty::Float(fty) = src.layout.ty.kind() else {
+            bug!("float_to_int_checked: non-float input type {}", src.layout.ty)
+        };
+
+        let (val, status) = match fty {
+            FloatTy::F16 => float_to_int_inner(self, src.to_scalar().to_f16()?, cast_to, round),
+            FloatTy::F32 => float_to_int_inner(self, src.to_scalar().to_f32()?, cast_to, round),
+            FloatTy::F64 => float_to_int_inner(self, src.to_scalar().to_f64()?, cast_to, round),
+            FloatTy::F128 => float_to_int_inner(self, src.to_scalar().to_f128()?, cast_to, round),
+        };
+
+        if status.intersects(
+            rustc_apfloat::Status::INVALID_OP
+                | rustc_apfloat::Status::OVERFLOW
+                | rustc_apfloat::Status::UNDERFLOW,
+        ) {
+            // Floating point value is NaN (flagged with INVALID_OP) or outside the range
+            // of values of the integer type (flagged with OVERFLOW or UNDERFLOW).
+            interp_ok(None)
+        } else {
+            // Floating point value can be represented by the integer type after rounding.
+            // The INEXACT flag is ignored on purpose to allow rounding.
+            interp_ok(Some(ImmTy::from_scalar(val, cast_to)))
+        }
     }
 }

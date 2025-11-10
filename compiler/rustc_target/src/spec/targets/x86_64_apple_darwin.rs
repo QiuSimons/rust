@@ -7,7 +7,7 @@ pub(crate) fn target() -> Target {
         llvm_target,
         metadata: TargetMetadata {
             description: Some("x86_64 Apple macOS (10.12+, Sierra+)".into()),
-            tier: Some(1),
+            tier: Some(2),
             host_tools: Some(true),
             std: Some(true),
         },
@@ -21,7 +21,8 @@ pub(crate) fn target() -> Target {
             supported_sanitizers: SanitizerSet::ADDRESS
                 | SanitizerSet::CFI
                 | SanitizerSet::LEAK
-                | SanitizerSet::THREAD,
+                | SanitizerSet::THREAD
+                | SanitizerSet::REALTIME,
             supports_xray: true,
             ..opts
         },

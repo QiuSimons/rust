@@ -2,16 +2,15 @@ error: the evaluated program deadlocked
    |
    = note: this thread got stuck here
    = note: (no span available)
-   = note: BACKTRACE on thread `unnamed-ID`:
 
 error: the evaluated program deadlocked
-  --> RUSTLIB/std/src/sys/pal/PLATFORM/thread.rs:LL:CC
+  --> RUSTLIB/std/src/sys/thread/PLATFORM.rs:LL:CC
    |
 LL |         let ret = unsafe { libc::pthread_join(id, ptr::null_mut()) };
    |                                                                  ^ this thread got stuck here
    |
    = note: BACKTRACE:
-   = note: inside `std::sys::pal::PLATFORM::thread::Thread::join` at RUSTLIB/std/src/sys/pal/PLATFORM/thread.rs:LL:CC
+   = note: inside `std::sys::thread::PLATFORM::Thread::join` at RUSTLIB/std/src/sys/thread/PLATFORM.rs:LL:CC
    = note: inside `std::thread::JoinInner::<'_, ()>::join` at RUSTLIB/std/src/thread/mod.rs:LL:CC
    = note: inside `std::thread::JoinHandle::<()>::join` at RUSTLIB/std/src/thread/mod.rs:LL:CC
 note: inside `main`
@@ -25,15 +24,12 @@ error: the evaluated program deadlocked
    |
 LL |         check_epoll_wait::<TAG>(epfd, &[(expected_event, expected_value)], -1);
    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this thread got stuck here
-   |
-   = note: BACKTRACE on thread `unnamed-ID`:
-   = note: inside closure at tests/fail-dep/libc/libc_epoll_block_two_thread.rs:LL:CC
 
 error: the evaluated program deadlocked
    |
    = note: this thread got stuck here
    = note: (no span available)
-   = note: BACKTRACE on thread `unnamed-ID`:
+   = note: duplicate diagnostic emitted due to `-Z deduplicate-diagnostics=no`
 
 note: some details are omitted, run with `MIRIFLAGS=-Zmiri-backtrace=full` for a verbose backtrace
 

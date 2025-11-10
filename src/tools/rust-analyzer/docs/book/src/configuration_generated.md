@@ -610,6 +610,13 @@ The warnings will be indicated by a blue squiggly underline in code and a blue i
 the `Problems Panel`.
 
 
+## rust-analyzer.document.symbol.search.excludeLocals {#document.symbol.search.excludeLocals}
+
+Default: `true`
+
+Exclude all locals from document symbol search.
+
+
 ## rust-analyzer.files.exclude {#files.exclude}
 
 Default: `[]`
@@ -626,6 +633,13 @@ Code's `files.watcherExclude`.
 Default: `"client"`
 
 Controls file watching implementation.
+
+
+## rust-analyzer.gotoImplementations.filterAdjacentDerives {#gotoImplementations.filterAdjacentDerives}
+
+Default: `false`
+
+If this is `true`, when "Goto Implementations" and in "Implementations" lens, are triggered on a `struct` or `enum` or `union`, we filter out trait implementations that originate from `derive`s above the type.
 
 
 ## rust-analyzer.highlightRelated.branchExitPoints.enable {#highlightRelated.branchExitPoints.enable}
@@ -952,6 +966,17 @@ Default: `"never"`
 Show enum variant discriminant hints.
 
 
+## rust-analyzer.inlayHints.expressionAdjustmentHints.disableReborrows {#inlayHints.expressionAdjustmentHints.disableReborrows}
+
+Default: `true`
+
+Disable reborrows in expression adjustments inlay hints.
+
+Reborrows are a pair of a builtin deref then borrow, i.e. `&*`. They are inserted by the compiler but are mostly useless to the programmer.
+
+Note: if the deref is not builtin (an overloaded deref), or the borrow is `&raw const`/`&raw mut`, they are not removed.
+
+
 ## rust-analyzer.inlayHints.expressionAdjustmentHints.enable {#inlayHints.expressionAdjustmentHints.enable}
 
 Default: `"never"`
@@ -1027,6 +1052,8 @@ Prefer using parameter names as the name for elided lifetime hints if possible.
 Default: `25`
 
 Maximum length for inlay hints. Set to null to have an unlimited length.
+
+**Note:** This is mostly a hint, and we don't guarantee to strictly follow the limit.
 
 
 ## rust-analyzer.inlayHints.parameterHints.enable {#inlayHints.parameterHints.enable}
@@ -1269,6 +1296,16 @@ Default: `null`
 Internal config, path to proc-macro server executable.
 
 
+## rust-analyzer.profiling.memoryProfile {#profiling.memoryProfile}
+
+Default: `null`
+
+The path where to save memory profiling output.
+
+**Note:** Memory profiling is not enabled by default in rust-analyzer builds, you need to build
+from source for it.
+
+
 ## rust-analyzer.references.excludeImports {#references.excludeImports}
 
 Default: `false`
@@ -1303,7 +1340,7 @@ tests or binaries. For example, it may be `--release`.
 Default:
 ```json
 [
-  "--show-output"
+  "--nocapture"
 ]
 ```
 
@@ -1358,6 +1395,17 @@ Default: `false`
 Enables the use of rustfmt's unstable range formatting command for the
 `textDocument/rangeFormatting` request. The rustfmt option is unstable and only
 available on a nightly build.
+
+
+## rust-analyzer.semanticHighlighting.comments.enable {#semanticHighlighting.comments.enable}
+
+Default: `true`
+
+Use semantic tokens for comments.
+
+In some editors (e.g. vscode) semantic tokens override other highlighting grammars.
+By disabling semantic tokens for comments, other grammars can be used to highlight
+their contents.
 
 
 ## rust-analyzer.semanticHighlighting.doc.comment.inject.enable {#semanticHighlighting.doc.comment.inject.enable}

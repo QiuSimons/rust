@@ -11,7 +11,7 @@
 //! - idempotency properties asserted in `perms.rs` (for optimizations)
 
 use std::ops::Range;
-use std::{fmt, mem};
+use std::{cmp, fmt, mem};
 
 use rustc_abi::Size;
 use rustc_data_structures::fx::FxHashSet;
@@ -24,8 +24,8 @@ use crate::borrow_tracker::tree_borrows::diagnostics::{
 };
 use crate::borrow_tracker::tree_borrows::foreign_access_skipping::IdempotentForeignAccess;
 use crate::borrow_tracker::tree_borrows::perms::PermTransition;
-use crate::borrow_tracker::tree_borrows::unimap::{UniEntry, UniIndex, UniKeyMap, UniValMap};
-use crate::borrow_tracker::{GlobalState, ProtectorKind};
+use crate::borrow_tracker::tree_borrows::unimap::{UniIndex, UniKeyMap, UniValMap};
+use crate::borrow_tracker::{AccessKind, GlobalState, ProtectorKind};
 use crate::*;
 
 mod tests;
@@ -57,7 +57,7 @@ pub(super) struct LocationState {
 impl LocationState {
     /// Constructs a new initial state. It has neither been accessed, nor been subjected
     /// to any foreign access yet.
-    /// The permission is not allowed to be `Active`.
+    /// The permission is not allowed to be `Unique`.
     /// `sifa` is the (strongest) idempotent foreign access, see `foreign_access_skipping.rs`
     pub fn new_non_accessed(permission: Permission, sifa: IdempotentForeignAccess) -> Self {
         assert!(permission.is_initial() || permission.is_disabled());
@@ -73,21 +73,8 @@ impl LocationState {
 
     /// Check if the location has been accessed, i.e. if it has
     /// ever been accessed through a child pointer.
-    pub fn is_accessed(&self) -> bool {
+    pub fn accessed(&self) -> bool {
         self.accessed
-    }
-
-    /// Check if the state can exist as the initial permission of a pointer.
-    ///
-    /// Do not confuse with `is_accessed`, the two are almost orthogonal
-    /// as apart from `Active` which is not initial and must be accessed,
-    /// any other permission can have an arbitrary combination of being
-    /// initial/accessed.
-    /// FIXME: when the corresponding `assert` in `tree_borrows/mod.rs` finally
-    /// passes and can be uncommented, remove this `#[allow(dead_code)]`.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn is_initial(&self) -> bool {
-        self.permission.is_initial()
     }
 
     pub fn permission(&self) -> Permission {
@@ -170,7 +157,7 @@ impl LocationState {
             }
             if self.permission.is_frozen() && access_kind == AccessKind::Read {
                 // A foreign read to a `Frozen` tag will have almost no observable effect.
-                // It's a theorem that `Frozen` nodes have no active children, so all children
+                // It's a theorem that `Frozen` nodes have no `Unique` children, so all children
                 // already survive foreign reads. Foreign reads in general have almost no
                 // effect, the only further thing they could do is make protected `Reserved`
                 // nodes become conflicted, i.e. make them reject child writes for the further
@@ -265,7 +252,7 @@ pub(super) struct Node {
     pub children: SmallVec<[UniIndex; 4]>,
     /// Either `Reserved`,  `Frozen`, or `Disabled`, it is the permission this tag will
     /// lazily be initialized to on the first access.
-    /// It is only ever `Disabled` for a tree root, since the root is initialized to `Active` by
+    /// It is only ever `Disabled` for a tree root, since the root is initialized to `Unique` by
     /// its own separate mechanism.
     default_initial_perm: Permission,
     /// The default initial (strongest) idempotent foreign access.
@@ -278,13 +265,15 @@ pub(super) struct Node {
 }
 
 /// Data given to the transition function
-struct NodeAppArgs<'node> {
-    /// Node on which the transition is currently being applied
-    node: &'node mut Node,
-    /// Mutable access to its permissions
-    perm: UniEntry<'node, LocationState>,
-    /// Relative position of the access
+struct NodeAppArgs<'visit> {
+    /// The index of the current node.
+    idx: UniIndex,
+    /// Relative position of the access.
     rel_pos: AccessRelatedness,
+    /// The node map of this tree.
+    nodes: &'visit mut UniValMap<Node>,
+    /// The permissions map of this tree.
+    perms: &'visit mut UniValMap<LocationState>,
 }
 /// Data given to the error handler
 struct ErrHandlerArgs<'node, InErr> {
@@ -361,8 +350,7 @@ where
         idx: UniIndex,
         rel_pos: AccessRelatedness,
     ) -> ContinueTraversal {
-        let node = this.nodes.get_mut(idx).unwrap();
-        let args = NodeAppArgs { node, perm: this.perms.entry(idx), rel_pos };
+        let args = NodeAppArgs { idx, rel_pos, nodes: this.nodes, perms: this.perms };
         (self.f_continue)(&args)
     }
 
@@ -372,16 +360,14 @@ where
         idx: UniIndex,
         rel_pos: AccessRelatedness,
     ) -> Result<(), OutErr> {
-        let node = this.nodes.get_mut(idx).unwrap();
-        (self.f_propagate)(NodeAppArgs { node, perm: this.perms.entry(idx), rel_pos }).map_err(
-            |error_kind| {
+        (self.f_propagate)(NodeAppArgs { idx, rel_pos, nodes: this.nodes, perms: this.perms })
+            .map_err(|error_kind| {
                 (self.err_builder)(ErrHandlerArgs {
                     error_kind,
                     conflicting_info: &this.nodes.get(idx).unwrap().debug_info,
                     accessed_info: &this.nodes.get(self.initial).unwrap().debug_info,
                 })
-            },
-        )
+            })
     }
 
     fn go_upwards_from_accessed(
@@ -399,14 +385,14 @@ where
         // be handled differently here compared to the further parents
         // of `accesssed_node`.
         {
-            self.propagate_at(this, accessed_node, AccessRelatedness::This)?;
+            self.propagate_at(this, accessed_node, AccessRelatedness::LocalAccess)?;
             if matches!(visit_children, ChildrenVisitMode::VisitChildrenOfAccessed) {
                 let accessed_node = this.nodes.get(accessed_node).unwrap();
                 // We `rev()` here because we reverse the entire stack later.
                 for &child in accessed_node.children.iter().rev() {
                     self.stack.push((
                         child,
-                        AccessRelatedness::AncestorAccess,
+                        AccessRelatedness::ForeignAccess,
                         RecursionState::BeforeChildren,
                     ));
                 }
@@ -417,7 +403,7 @@ where
         // not the subtree that contains the accessed node.
         let mut last_node = accessed_node;
         while let Some(current) = this.nodes.get(last_node).unwrap().parent {
-            self.propagate_at(this, current, AccessRelatedness::StrictChildAccess)?;
+            self.propagate_at(this, current, AccessRelatedness::LocalAccess)?;
             let node = this.nodes.get(current).unwrap();
             // We `rev()` here because we reverse the entire stack later.
             for &child in node.children.iter().rev() {
@@ -426,7 +412,7 @@ where
                 }
                 self.stack.push((
                     child,
-                    AccessRelatedness::CousinAccess,
+                    AccessRelatedness::ForeignAccess,
                     RecursionState::BeforeChildren,
                 ));
             }
@@ -598,14 +584,14 @@ impl Tree {
         };
         let rperms = {
             let mut perms = UniValMap::default();
-            // We manually set it to `Active` on all in-bounds positions.
-            // We also ensure that it is accessed, so that no `Active` but
+            // We manually set it to `Unique` on all in-bounds positions.
+            // We also ensure that it is accessed, so that no `Unique` but
             // not yet accessed nodes exist. Essentially, we pretend there
-            // was a write that initialized these to `Active`.
+            // was a write that initialized these to `Unique`.
             perms.insert(
                 root_idx,
                 LocationState::new_accessed(
-                    Permission::new_active(),
+                    Permission::new_unique(),
                     IdempotentForeignAccess::None,
                 ),
             );
@@ -618,30 +604,26 @@ impl Tree {
 impl<'tcx> Tree {
     /// Insert a new tag in the tree.
     ///
-    /// `initial_perms` defines the initial permissions for the part of memory
-    /// that is already considered "initialized" immediately. The ranges in this
-    /// map are relative to `base_offset`.
-    /// `default_perm` defines the initial permission for the rest of the allocation.
-    ///
-    /// For all non-accessed locations in the RangeMap (those that haven't had an
-    /// implicit read), their SIFA must be weaker than or as weak as the SIFA of
-    /// `default_perm`.
+    /// `inside_perm` defines the initial permissions for a block of memory starting at
+    /// `base_offset`. These may nor may not be already marked as "accessed".
+    /// `outside_perm` defines the initial permission for the rest of the allocation.
+    /// These are definitely not "accessed".
     pub(super) fn new_child(
         &mut self,
         base_offset: Size,
         parent_tag: BorTag,
         new_tag: BorTag,
-        initial_perms: DedupRangeMap<LocationState>,
-        default_perm: Permission,
+        inside_perms: DedupRangeMap<LocationState>,
+        outside_perm: Permission,
         protected: bool,
         span: Span,
     ) -> InterpResult<'tcx> {
         let idx = self.tag_mapping.insert(new_tag);
         let parent_idx = self.tag_mapping.get(&parent_tag).unwrap();
-        assert!(default_perm.is_initial());
+        assert!(outside_perm.is_initial());
 
         let default_strongest_idempotent =
-            default_perm.strongest_idempotent_foreign_access(protected);
+            outside_perm.strongest_idempotent_foreign_access(protected);
         // Create the node
         self.nodes.insert(
             idx,
@@ -649,47 +631,57 @@ impl<'tcx> Tree {
                 tag: new_tag,
                 parent: Some(parent_idx),
                 children: SmallVec::default(),
-                default_initial_perm: default_perm,
+                default_initial_perm: outside_perm,
                 default_initial_idempotent_foreign_access: default_strongest_idempotent,
-                debug_info: NodeDebugInfo::new(new_tag, default_perm, span),
+                debug_info: NodeDebugInfo::new(new_tag, outside_perm, span),
             },
         );
         // Register new_tag as a child of parent_tag
         self.nodes.get_mut(parent_idx).unwrap().children.push(idx);
 
+        // We need to know the weakest SIFA for `update_idempotent_foreign_access_after_retag`.
+        let mut min_sifa = default_strongest_idempotent;
         for (Range { start, end }, &perm) in
-            initial_perms.iter(Size::from_bytes(0), initial_perms.size())
+            inside_perms.iter(Size::from_bytes(0), inside_perms.size())
         {
-            assert!(perm.is_initial());
+            assert!(perm.permission.is_initial());
+            assert_eq!(
+                perm.idempotent_foreign_access,
+                perm.permission.strongest_idempotent_foreign_access(protected)
+            );
+
+            min_sifa = cmp::min(min_sifa, perm.idempotent_foreign_access);
             for (_perms_range, perms) in self
                 .rperms
                 .iter_mut(Size::from_bytes(start) + base_offset, Size::from_bytes(end - start))
             {
-                assert!(
-                    default_strongest_idempotent
-                        >= perm.permission.strongest_idempotent_foreign_access(protected)
-                );
                 perms.insert(idx, perm);
             }
         }
 
-        // Inserting the new perms might have broken the SIFA invariant (see `foreign_access_skipping.rs`).
-        // We now weaken the recorded SIFA for our parents, until the invariant is restored.
-        // We could weaken them all to `LocalAccess`, but it is more efficient to compute the SIFA
-        // for the new permission statically, and use that.
-        // See the comment in `tb_reborrow` for why it is correct to use the SIFA of `default_uninit_perm`.
-        self.update_last_accessed_after_retag(parent_idx, default_strongest_idempotent);
+        // Inserting the new perms might have broken the SIFA invariant (see
+        // `foreign_access_skipping.rs`) if the SIFA we inserted is weaker than that of some parent.
+        // We now weaken the recorded SIFA for our parents, until the invariant is restored. We
+        // could weaken them all to `None`, but it is more efficient to compute the SIFA for the new
+        // permission statically, and use that. For this we need the *minimum* SIFA (`None` needs
+        // more fixup than `Write`).
+        self.update_idempotent_foreign_access_after_retag(parent_idx, min_sifa);
 
         interp_ok(())
     }
 
-    /// Restores the SIFA "children are stronger" invariant after a retag.
-    /// See `foreign_access_skipping` and `new_child`.
-    fn update_last_accessed_after_retag(
+    /// Restores the SIFA "children are stronger"/"parents are weaker" invariant after a retag:
+    /// reduce the SIFA of `current` and its parents to be no stronger than `strongest_allowed`.
+    /// See `foreign_access_skipping.rs` and [`Tree::new_child`].
+    fn update_idempotent_foreign_access_after_retag(
         &mut self,
         mut current: UniIndex,
         strongest_allowed: IdempotentForeignAccess,
     ) {
+        if strongest_allowed == IdempotentForeignAccess::Write {
+            // Nothing is stronger than `Write`.
+            return;
+        }
         // We walk the tree upwards, until the invariant is restored
         loop {
             let current_node = self.nodes.get_mut(current).unwrap();
@@ -748,14 +740,18 @@ impl<'tcx> Tree {
                     // visit all children, skipping none
                     |_| ContinueTraversal::Recurse,
                     |args: NodeAppArgs<'_>| -> Result<(), TransitionError> {
-                        let NodeAppArgs { node, perm, .. } = args;
+                        let node = args.nodes.get(args.idx).unwrap();
+                        let perm = args.perms.entry(args.idx);
+
                         let perm =
                             perm.get().copied().unwrap_or_else(|| node.default_location_state());
                         if global.borrow().protected_tags.get(&node.tag)
                             == Some(&ProtectorKind::StrongProtector)
                             // Don't check for protector if it is a Cell (see `unsafe_cell_deallocate` in `interior_mutability.rs`).
                             // Related to https://github.com/rust-lang/rust/issues/55005.
-                            && !perm.permission().is_cell()
+                            && !perm.permission.is_cell()
+                            // Only trigger UB if the accessed bit is set, i.e. if the protector is actually protecting this offset. See #4579.
+                            && perm.accessed
                         {
                             Err(TransitionError::ProtectedDealloc)
                         } else {
@@ -788,7 +784,7 @@ impl<'tcx> Tree {
     /// - the access will be applied only to accessed locations of the allocation,
     /// - it will not be visible to children,
     /// - it will be recorded as a `FnExit` diagnostic access
-    /// - and it will be a read except if the location is `Active`, i.e. has been written to,
+    /// - and it will be a read except if the location is `Unique`, i.e. has been written to,
     ///   in which case it will be a write.
     ///
     /// `LocationState::perform_access` will take care of raising transition
@@ -817,32 +813,34 @@ impl<'tcx> Tree {
         // `perms_range` is only for diagnostics (it is the range of
         // the `RangeMap` on which we are currently working).
         let node_skipper = |access_kind: AccessKind, args: &NodeAppArgs<'_>| -> ContinueTraversal {
-            let NodeAppArgs { node, perm, rel_pos } = args;
+            let node = args.nodes.get(args.idx).unwrap();
+            let perm = args.perms.get(args.idx);
 
-            let old_state = perm.get().copied().unwrap_or_else(|| node.default_location_state());
-            old_state.skip_if_known_noop(access_kind, *rel_pos)
+            let old_state = perm.copied().unwrap_or_else(|| node.default_location_state());
+            old_state.skip_if_known_noop(access_kind, args.rel_pos)
         };
         let node_app = |perms_range: Range<u64>,
                         access_kind: AccessKind,
                         access_cause: diagnostics::AccessCause,
                         args: NodeAppArgs<'_>|
          -> Result<(), TransitionError> {
-            let NodeAppArgs { node, mut perm, rel_pos } = args;
+            let node = args.nodes.get_mut(args.idx).unwrap();
+            let mut perm = args.perms.entry(args.idx);
 
             let old_state = perm.or_insert(node.default_location_state());
 
             // Call this function now, which ensures it is only called when
             // `skip_if_known_noop` returns `Recurse`, due to the contract of
             // `traverse_this_parents_children_other`.
-            old_state.record_new_access(access_kind, rel_pos);
+            old_state.record_new_access(access_kind, args.rel_pos);
 
             let protected = global.borrow().protected_tags.contains_key(&node.tag);
-            let transition = old_state.perform_access(access_kind, rel_pos, protected)?;
+            let transition = old_state.perform_access(access_kind, args.rel_pos, protected)?;
             // Record the event as part of the history
             if !transition.is_noop() {
                 node.debug_info.history.push(diagnostics::Event {
                     transition,
-                    is_foreign: rel_pos.is_foreign(),
+                    is_foreign: args.rel_pos.is_foreign(),
                     access_cause,
                     access_range: access_range_and_kind.map(|x| x.0),
                     transition_range: perms_range,
@@ -1080,24 +1078,18 @@ impl VisitProvenance for Tree {
 /// Relative position of the access
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AccessRelatedness {
-    /// The accessed pointer is the current one
-    This,
-    /// The accessed pointer is a (transitive) child of the current one.
-    // Current pointer is excluded (unlike in some other places of this module
-    // where "child" is inclusive).
-    StrictChildAccess,
-    /// The accessed pointer is a (transitive) parent of the current one.
-    // Current pointer is excluded.
-    AncestorAccess,
-    /// The accessed pointer is neither of the above.
-    // It's a cousin/uncle/etc., something in a side branch.
-    CousinAccess,
+    /// The access happened either through the node itself or one of
+    /// its transitive children.
+    LocalAccess,
+    /// The access happened through this nodes ancestor or through
+    /// a sibling/cousin/uncle/etc.
+    ForeignAccess,
 }
 
 impl AccessRelatedness {
     /// Check that access is either Ancestor or Distant, i.e. not
     /// a transitive child (initial pointer included).
     pub fn is_foreign(self) -> bool {
-        matches!(self, AccessRelatedness::AncestorAccess | AccessRelatedness::CousinAccess)
+        matches!(self, AccessRelatedness::ForeignAccess)
     }
 }

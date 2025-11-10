@@ -8,11 +8,7 @@
 // We want to be able to build this crate with a stable compiler,
 // so no `#![feature]` attributes should be added.
 #![deny(unstable_features)]
-#![doc(
-    html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/",
-    html_playground_url = "https://play.rust-lang.org/",
-    test(attr(deny(warnings)))
-)]
+#![doc(test(attr(deny(warnings), allow(internal_features))))]
 // tidy-alphabetical-end
 
 use std::ops::Range;
@@ -858,7 +854,9 @@ impl<'input> Parser<'input> {
             self.errors.insert(
                 0,
                 ParseError {
-                    description: "expected format parameter to occur after `:`".to_owned(),
+                    description:
+                        "expected alignment specifier after `:` in format string; example: `{:>?}`"
+                            .to_owned(),
                     note: None,
                     label: format!("expected `{}` to occur after `:`", alignment),
                     span: range,

@@ -18,7 +18,7 @@
 pub mod project_json;
 pub mod toolchain_info {
     pub mod rustc_cfg;
-    pub mod target_data_layout;
+    pub mod target_data;
     pub mod target_tuple;
     pub mod version;
 
@@ -62,7 +62,7 @@ pub use crate::{
     build_dependencies::{ProcMacroDylibPath, WorkspaceBuildScripts},
     cargo_workspace::{
         CargoConfig, CargoFeatures, CargoMetadataConfig, CargoWorkspace, Package, PackageData,
-        PackageDependency, RustLibSource, Target, TargetData, TargetKind,
+        PackageDependency, RustLibSource, Target, TargetData, TargetDirectoryConfig, TargetKind,
     },
     manifest_path::ManifestPath,
     project_json::{ProjectJson, ProjectJsonData},

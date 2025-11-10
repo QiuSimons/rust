@@ -29,12 +29,12 @@ use rustc_hir::attrs::AttributeKind;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::{CRATE_DEF_ID, DefId, LocalDefId};
 use rustc_hir::intravisit::FnKind as HirFnKind;
-use rustc_hir::{Body, FnDecl, PatKind, PredicateOrigin, find_attr};
+use rustc_hir::{Body, FnDecl, ImplItemImplKind, PatKind, PredicateOrigin, find_attr};
 use rustc_middle::bug;
 use rustc_middle::lint::LevelAndSource;
 use rustc_middle::ty::layout::LayoutOf;
 use rustc_middle::ty::print::with_no_trimmed_paths;
-use rustc_middle::ty::{self, Ty, TyCtxt, TypeVisitableExt, Upcast, VariantDef};
+use rustc_middle::ty::{self, AssocContainer, Ty, TyCtxt, TypeVisitableExt, Upcast, VariantDef};
 use rustc_session::lint::FutureIncompatibilityReason;
 // hardwired lints from rustc_lint_defs
 pub use rustc_session::lint::builtin::*;
@@ -61,7 +61,6 @@ use crate::lints::{
     BuiltinUnreachablePub, BuiltinUnsafe, BuiltinUnstableFeatures, BuiltinUnusedDocComment,
     BuiltinUnusedDocCommentSub, BuiltinWhileTrue, InvalidAsmLabel,
 };
-use crate::nonstandard_style::{MethodLateContext, method_context};
 use crate::{
     EarlyContext, EarlyLintPass, LateContext, LateLintPass, Level, LintContext,
     fluent_generated as fluent,
@@ -153,7 +152,10 @@ declare_lint_pass!(NonShorthandFieldPatterns => [NON_SHORTHAND_FIELD_PATTERNS]);
 
 impl<'tcx> LateLintPass<'tcx> for NonShorthandFieldPatterns {
     fn check_pat(&mut self, cx: &LateContext<'_>, pat: &hir::Pat<'_>) {
-        if let PatKind::Struct(ref qpath, field_pats, _) = pat.kind {
+        // The result shouldn't be tainted, otherwise it will cause ICE.
+        if let PatKind::Struct(ref qpath, field_pats, _) = pat.kind
+            && cx.typeck_results().tainted_by_errors.is_none()
+        {
             let variant = cx
                 .typeck_results()
                 .pat_ty(pat)
@@ -311,15 +313,17 @@ impl EarlyLintPass for UnsafeCode {
             }
 
             ast::ItemKind::MacroDef(..) => {
-                if let Some(attr) = AttributeParser::parse_limited(
-                    cx.builder.sess(),
-                    &it.attrs,
-                    sym::allow_internal_unsafe,
-                    it.span,
-                    DUMMY_NODE_ID,
-                    Some(cx.builder.features()),
-                ) {
-                    self.report_unsafe(cx, attr.span(), BuiltinUnsafe::AllowInternalUnsafe);
+                if let Some(hir::Attribute::Parsed(AttributeKind::AllowInternalUnsafe(span))) =
+                    AttributeParser::parse_limited(
+                        cx.builder.sess(),
+                        &it.attrs,
+                        sym::allow_internal_unsafe,
+                        it.span,
+                        DUMMY_NODE_ID,
+                        Some(cx.builder.features()),
+                    )
+                {
+                    self.report_unsafe(cx, span, BuiltinUnsafe::AllowInternalUnsafe);
                 }
             }
 
@@ -392,7 +396,7 @@ pub struct MissingDoc;
 impl_lint_pass!(MissingDoc => [MISSING_DOCS]);
 
 fn has_doc(attr: &hir::Attribute) -> bool {
-    if attr.is_doc_comment() {
+    if attr.is_doc_comment().is_some() {
         return true;
     }
 
@@ -469,14 +473,14 @@ impl<'tcx> LateLintPass<'tcx> for MissingDoc {
     }
 
     fn check_impl_item(&mut self, cx: &LateContext<'_>, impl_item: &hir::ImplItem<'_>) {
-        let context = method_context(cx, impl_item.owner_id.def_id);
+        let container = cx.tcx.associated_item(impl_item.owner_id.def_id).container;
 
-        match context {
+        match container {
             // If the method is an impl for a trait, don't doc.
-            MethodLateContext::TraitImpl => return,
-            MethodLateContext::TraitAutoImpl => {}
+            AssocContainer::TraitImpl(_) => return,
+            AssocContainer::Trait => {}
             // If the method is an impl for an item with docs_hidden, don't doc.
-            MethodLateContext::PlainImpl => {
+            AssocContainer::InherentImpl => {
                 let parent = cx.tcx.hir_get_parent_item(impl_item.hir_id());
                 let impl_ty = cx.tcx.type_of(parent).instantiate_identity();
                 let outerdef = match impl_ty.kind() {
@@ -1321,9 +1325,8 @@ impl<'tcx> LateLintPass<'tcx> for UnreachablePub {
     }
 
     fn check_impl_item(&mut self, cx: &LateContext<'_>, impl_item: &hir::ImplItem<'_>) {
-        // Only lint inherent impl items.
-        if cx.tcx.associated_item(impl_item.owner_id).trait_item_def_id.is_none() {
-            self.perform_lint(cx, "item", impl_item.owner_id.def_id, impl_item.vis_span, false);
+        if let ImplItemImplKind::Inherent { vis_span } = impl_item.impl_kind {
+            self.perform_lint(cx, "item", impl_item.owner_id.def_id, vis_span, false);
         }
     }
 }
@@ -2333,13 +2336,9 @@ declare_lint_pass!(
 impl EarlyLintPass for IncompleteInternalFeatures {
     fn check_crate(&mut self, cx: &EarlyContext<'_>, _: &ast::Crate) {
         let features = cx.builder.features();
-        let lang_features =
-            features.enabled_lang_features().iter().map(|feat| (feat.gate_name, feat.attr_sp));
-        let lib_features =
-            features.enabled_lib_features().iter().map(|feat| (feat.gate_name, feat.attr_sp));
 
-        lang_features
-            .chain(lib_features)
+        features
+            .enabled_features_iter_stable_order()
             .filter(|(name, _)| features.incomplete(*name) || features.internal(*name))
             .for_each(|(name, span)| {
                 if features.incomplete(name) {
@@ -2876,6 +2875,71 @@ enum AsmLabelKind {
     Binary,
 }
 
+/// Checks if a potential label is actually a Hexagon register span notation.
+///
+/// Hexagon assembly uses register span notation like `r1:0`, `V5:4.w`, `p1:0` etc.
+/// These follow the pattern: `[letter][digit(s)]:[digit(s)][optional_suffix]`
+///
+/// Returns `true` if the string matches a valid Hexagon register span pattern.
+pub fn is_hexagon_register_span(possible_label: &str) -> bool {
+    // Extract the full register span from the context
+    if let Some(colon_idx) = possible_label.find(':') {
+        let after_colon = &possible_label[colon_idx + 1..];
+        is_hexagon_register_span_impl(&possible_label[..colon_idx], after_colon)
+    } else {
+        false
+    }
+}
+
+/// Helper function for use within the lint when we have statement context.
+fn is_hexagon_register_span_context(
+    possible_label: &str,
+    statement: &str,
+    colon_idx: usize,
+) -> bool {
+    // Extract what comes after the colon in the statement
+    let after_colon_start = colon_idx + 1;
+    if after_colon_start >= statement.len() {
+        return false;
+    }
+
+    // Get the part after the colon, up to the next whitespace or special character
+    let after_colon_full = &statement[after_colon_start..];
+    let after_colon = after_colon_full
+        .chars()
+        .take_while(|&c| c.is_ascii_alphanumeric() || c == '.')
+        .collect::<String>();
+
+    is_hexagon_register_span_impl(possible_label, &after_colon)
+}
+
+/// Core implementation for checking hexagon register spans.
+fn is_hexagon_register_span_impl(before_colon: &str, after_colon: &str) -> bool {
+    if before_colon.len() < 1 || after_colon.is_empty() {
+        return false;
+    }
+
+    let mut chars = before_colon.chars();
+    let start = chars.next().unwrap();
+
+    // Must start with a letter (r, V, p, etc.)
+    if !start.is_ascii_alphabetic() {
+        return false;
+    }
+
+    let rest = &before_colon[1..];
+
+    // Check if the part after the first letter is all digits and non-empty
+    if rest.is_empty() || !rest.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+
+    // Check if after colon starts with digits (may have suffix like .w, .h)
+    let digits_after = after_colon.chars().take_while(|c| c.is_ascii_digit()).collect::<String>();
+
+    !digits_after.is_empty()
+}
+
 impl<'tcx> LateLintPass<'tcx> for AsmLabels {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx hir::Expr<'tcx>) {
         if let hir::Expr {
@@ -2958,9 +3022,17 @@ impl<'tcx> LateLintPass<'tcx> for AsmLabels {
                             break 'label_loop;
                         }
 
+                        // Check for Hexagon register span notation (e.g., "r1:0", "V5:4", "V3:2.w")
+                        // This is valid Hexagon assembly syntax, not a label
+                        if matches!(cx.tcx.sess.asm_arch, Some(InlineAsmArch::Hexagon))
+                            && is_hexagon_register_span_context(possible_label, statement, idx)
+                        {
+                            break 'label_loop;
+                        }
+
                         for c in chars {
                             // Inside a template format arg, any character is permitted for the
-                            // puproses of label detection because we assume that it can be
+                            // purposes of label detection because we assume that it can be
                             // replaced with some other valid label string later. `options(raw)`
                             // asm blocks cannot have format args, so they are excluded from this
                             // special case.
@@ -3097,7 +3169,7 @@ impl EarlyLintPass for SpecialModuleName {
             if let ast::ItemKind::Mod(
                 _,
                 ident,
-                ast::ModKind::Unloaded | ast::ModKind::Loaded(_, ast::Inline::No, _, _),
+                ast::ModKind::Unloaded | ast::ModKind::Loaded(_, ast::Inline::No { .. }, _),
             ) = item.kind
             {
                 if item.attrs.iter().any(|a| a.has_name(sym::path)) {

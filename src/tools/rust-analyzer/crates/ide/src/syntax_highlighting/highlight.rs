@@ -137,7 +137,7 @@ fn punctuation(
         }
         (T![!], MACRO_RULES) => HlPunct::MacroBang.into(),
         (T![!], NEVER_TYPE) => HlTag::BuiltinType.into(),
-        (T![!], PREFIX_EXPR) => HlOperator::Logical.into(),
+        (T![!], PREFIX_EXPR) => HlOperator::Negation.into(),
         (T![*], PTR_TYPE) => HlTag::Keyword.into(),
         (T![*], PREFIX_EXPR) => {
             let h = HlTag::Operator(HlOperator::Other).into();
@@ -576,7 +576,6 @@ pub(super) fn highlight_def(
             h
         }
         Definition::Trait(_) => Highlight::new(HlTag::Symbol(SymbolKind::Trait)),
-        Definition::TraitAlias(_) => Highlight::new(HlTag::Symbol(SymbolKind::TraitAlias)),
         Definition::TypeAlias(type_) => {
             let mut h = Highlight::new(HlTag::Symbol(SymbolKind::TypeAlias));
 
@@ -780,7 +779,6 @@ fn highlight_name_by_syntax(name: ast::Name) -> Highlight {
         MACRO_RULES => SymbolKind::Macro,
         CONST_PARAM => SymbolKind::ConstParam,
         SELF_PARAM => SymbolKind::SelfParam,
-        TRAIT_ALIAS => SymbolKind::TraitAlias,
         ASM_OPERAND_NAMED => SymbolKind::Local,
         _ => return default.into(),
     };

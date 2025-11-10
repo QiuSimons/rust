@@ -1,7 +1,5 @@
 /*
  * TODO(antoyo): implement equality in libgccjit based on https://zpz.github.io/blog/overloading-equality-operator-in-cpp-class-hierarchy/ (for type equality?)
- * TODO(antoyo): support #[inline] attributes.
- * TODO(antoyo): support LTO (gcc's equivalent to Full LTO is -flto -flto-partition=one — https://documentation.suse.com/sbp/all/html/SBP-GCC-10/index.html).
  * For Thin LTO, this might be helpful:
 // cspell:disable-next-line
  * In gcc 4.6 -fwhopr was removed and became default with -flto. The non-whopr path can still be executed via -flto-partition=none.
@@ -15,21 +13,12 @@
  * TODO(antoyo): remove the patches.
  */
 
-#![allow(internal_features)]
-#![doc(rust_logo)]
-#![feature(rustdoc_internals)]
 #![feature(rustc_private)]
 #![recursion_limit = "256"]
 #![warn(rust_2018_idioms)]
 #![warn(unused_lifetimes)]
 #![deny(clippy::pattern_type_mismatch)]
 #![allow(clippy::needless_lifetimes, clippy::uninlined_format_args)]
-
-// These crates are pulled from the sysroot because they are part of
-// rustc's public API, so we need to ensure version compatibility.
-extern crate smallvec;
-#[macro_use]
-extern crate tracing;
 
 // The rustc crates we need
 extern crate rustc_abi;
@@ -44,6 +33,7 @@ extern crate rustc_hir;
 extern crate rustc_index;
 #[cfg(feature = "master")]
 extern crate rustc_interface;
+extern crate rustc_log;
 extern crate rustc_macros;
 extern crate rustc_middle;
 extern crate rustc_session;
@@ -92,8 +82,7 @@ use back::lto::{ThinBuffer, ThinData};
 use gccjit::{CType, Context, OptimizationLevel};
 #[cfg(feature = "master")]
 use gccjit::{TargetInfo, Version};
-use rustc_ast::expand::allocator::AllocatorKind;
-use rustc_ast::expand::autodiff_attrs::AutoDiffItem;
+use rustc_ast::expand::allocator::AllocatorMethod;
 use rustc_codegen_ssa::back::lto::{SerializedModule, ThinModule};
 use rustc_codegen_ssa::back::write::{
     CodegenContext, FatLtoInput, ModuleConfig, TargetMachineFactoryFn,
@@ -111,12 +100,11 @@ use rustc_middle::util::Providers;
 use rustc_session::Session;
 use rustc_session::config::{OptLevel, OutputFilenames};
 use rustc_span::Symbol;
-use rustc_span::fatal_error::FatalError;
-use rustc_target::spec::RelocModel;
+use rustc_target::spec::{Arch, RelocModel};
 use tempfile::TempDir;
 
 use crate::back::lto::ModuleBuffer;
-use crate::gcc_util::target_cpu;
+use crate::gcc_util::{target_cpu, to_gcc_features};
 
 rustc_fluent_macro::fluent_messages! { "../messages.ftl" }
 
@@ -186,6 +174,10 @@ impl CodegenBackend for GccCodegenBackend {
         crate::DEFAULT_LOCALE_RESOURCE
     }
 
+    fn name(&self) -> &'static str {
+        "gcc"
+    }
+
     fn init(&self, _sess: &Session) {
         #[cfg(feature = "master")]
         {
@@ -225,7 +217,7 @@ impl CodegenBackend for GccCodegenBackend {
     }
 
     fn provide(&self, providers: &mut Providers) {
-        providers.global_backend_features = |tcx, ()| gcc_util::global_gcc_features(tcx.sess, true)
+        providers.global_backend_features = |tcx, ()| gcc_util::global_gcc_features(tcx.sess)
     }
 
     fn codegen_crate(&self, tcx: TyCtxt<'_>) -> Box<dyn Any> {
@@ -254,7 +246,7 @@ impl CodegenBackend for GccCodegenBackend {
 
 fn new_context<'gcc, 'tcx>(tcx: TyCtxt<'tcx>) -> Context<'gcc> {
     let context = Context::default();
-    if tcx.sess.target.arch == "x86" || tcx.sess.target.arch == "x86_64" {
+    if matches!(tcx.sess.target.arch, Arch::X86 | Arch::X86_64) {
         context.add_command_line_option("-masm=intel");
     }
     #[cfg(feature = "master")]
@@ -282,8 +274,7 @@ impl ExtraBackendMethods for GccCodegenBackend {
         &self,
         tcx: TyCtxt<'_>,
         module_name: &str,
-        kind: AllocatorKind,
-        alloc_error_handler_kind: AllocatorKind,
+        methods: &[AllocatorMethod],
     ) -> Self::Module {
         let mut mods = GccContext {
             context: Arc::new(SyncContext::new(new_context(tcx))),
@@ -293,7 +284,7 @@ impl ExtraBackendMethods for GccCodegenBackend {
         };
 
         unsafe {
-            allocator::codegen(tcx, &mut mods, module_name, kind, alloc_error_handler_kind);
+            allocator::codegen(tcx, &mut mods, module_name, methods);
         }
         mods
     }
@@ -363,12 +354,7 @@ impl WriteBackendMethods for GccCodegenBackend {
         _exported_symbols_for_lto: &[String],
         each_linked_rlib_for_lto: &[PathBuf],
         modules: Vec<FatLtoInput<Self>>,
-        diff_functions: Vec<AutoDiffItem>,
-    ) -> Result<ModuleCodegen<Self::Module>, FatalError> {
-        if !diff_functions.is_empty() {
-            unimplemented!();
-        }
-
+    ) -> ModuleCodegen<Self::Module> {
         back::lto::run_fat(cgcx, each_linked_rlib_for_lto, modules)
     }
 
@@ -379,7 +365,7 @@ impl WriteBackendMethods for GccCodegenBackend {
         each_linked_rlib_for_lto: &[PathBuf],
         modules: Vec<(String, Self::ThinBuffer)>,
         cached_modules: Vec<(SerializedModule<Self::ModuleBuffer>, WorkProduct)>,
-    ) -> Result<(Vec<ThinModule<Self>>, Vec<WorkProduct>), FatalError> {
+    ) -> (Vec<ThinModule<Self>>, Vec<WorkProduct>) {
         back::lto::run_thin(cgcx, each_linked_rlib_for_lto, modules, cached_modules)
     }
 
@@ -396,15 +382,14 @@ impl WriteBackendMethods for GccCodegenBackend {
         _dcx: DiagCtxtHandle<'_>,
         module: &mut ModuleCodegen<Self::Module>,
         config: &ModuleConfig,
-    ) -> Result<(), FatalError> {
+    ) {
         module.module_llvm.context.set_optimization_level(to_gcc_opt_level(config.opt_level));
-        Ok(())
     }
 
     fn optimize_thin(
         cgcx: &CodegenContext<Self>,
         thin: ThinModule<Self>,
-    ) -> Result<ModuleCodegen<Self::Module>, FatalError> {
+    ) -> ModuleCodegen<Self::Module> {
         back::lto::optimize_thin_module(thin, cgcx)
     }
 
@@ -412,15 +397,12 @@ impl WriteBackendMethods for GccCodegenBackend {
         cgcx: &CodegenContext<Self>,
         module: ModuleCodegen<Self::Module>,
         config: &ModuleConfig,
-    ) -> Result<CompiledModule, FatalError> {
+    ) -> CompiledModule {
         back::write::codegen(cgcx, module, config)
     }
 
-    fn prepare_thin(
-        module: ModuleCodegen<Self::Module>,
-        emit_summary: bool,
-    ) -> (String, Self::ThinBuffer) {
-        back::lto::prepare_thin(module, emit_summary)
+    fn prepare_thin(module: ModuleCodegen<Self::Module>) -> (String, Self::ThinBuffer) {
+        back::lto::prepare_thin(module)
     }
 
     fn serialize_module(_module: ModuleCodegen<Self::Module>) -> (String, Self::ModuleBuffer) {
@@ -461,21 +443,25 @@ fn to_gcc_opt_level(optlevel: Option<OptLevel>) -> OptimizationLevel {
 
 /// Returns the features that should be set in `cfg(target_feature)`.
 fn target_config(sess: &Session, target_info: &LockedTargetInfo) -> TargetConfig {
-    let (unstable_target_features, target_features) = cfg_target_feature(sess, |feature| {
-        // TODO: we disable Neon for now since we don't support the LLVM intrinsics for it.
-        if feature == "neon" {
-            return false;
-        }
-        target_info.cpu_supports(feature)
-        // cSpell:disable
-        /*
-          adx, aes, avx, avx2, avx512bf16, avx512bitalg, avx512bw, avx512cd, avx512dq, avx512er, avx512f, avx512fp16, avx512ifma,
-          avx512pf, avx512vbmi, avx512vbmi2, avx512vl, avx512vnni, avx512vp2intersect, avx512vpopcntdq,
-          bmi1, bmi2, cmpxchg16b, ermsb, f16c, fma, fxsr, gfni, lzcnt, movbe, pclmulqdq, popcnt, rdrand, rdseed, rtm,
-          sha, sse, sse2, sse3, sse4.1, sse4.2, sse4a, ssse3, tbm, vaes, vpclmulqdq, xsave, xsavec, xsaveopt, xsaves
-        */
-        // cSpell:enable
-    });
+    let (unstable_target_features, target_features) = cfg_target_feature(
+        sess,
+        |feature| to_gcc_features(sess, feature),
+        |feature| {
+            // TODO: we disable Neon for now since we don't support the LLVM intrinsics for it.
+            if feature == "neon" {
+                return false;
+            }
+            target_info.cpu_supports(feature)
+            // cSpell:disable
+            /*
+              adx, aes, avx, avx2, avx512bf16, avx512bitalg, avx512bw, avx512cd, avx512dq, avx512er, avx512f, avx512fp16, avx512ifma,
+              avx512pf, avx512vbmi, avx512vbmi2, avx512vl, avx512vnni, avx512vp2intersect, avx512vpopcntdq,
+              bmi1, bmi2, cmpxchg16b, ermsb, f16c, fma, fxsr, gfni, lzcnt, movbe, pclmulqdq, popcnt, rdrand, rdseed, rtm,
+              sha, sse, sse2, sse3, sse4.1, sse4.2, sse4a, ssse3, tbm, vaes, vpclmulqdq, xsave, xsavec, xsaveopt, xsaves
+            */
+            // cSpell:enable
+        },
+    );
 
     let has_reliable_f16 = target_info.supports_target_dependent_type(CType::Float16);
     let has_reliable_f128 = target_info.supports_target_dependent_type(CType::Float128);

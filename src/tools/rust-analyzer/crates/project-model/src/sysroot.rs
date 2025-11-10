@@ -9,7 +9,7 @@ use std::{env, fs, ops::Not, path::Path, process::Command};
 
 use anyhow::{Result, format_err};
 use itertools::Itertools;
-use paths::{AbsPath, AbsPathBuf, Utf8Path, Utf8PathBuf};
+use paths::{AbsPath, AbsPathBuf, Utf8PathBuf};
 use rustc_hash::FxHashMap;
 use stdx::format_to;
 use toolchain::{Tool, probe_for_binary};
@@ -30,7 +30,7 @@ pub struct Sysroot {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum RustLibSrcWorkspace {
-    Workspace(CargoWorkspace),
+    Workspace { ws: CargoWorkspace, metadata_err: Option<String> },
     Json(ProjectJson),
     Stitched(stitched::Stitched),
     Empty,
@@ -39,7 +39,9 @@ pub enum RustLibSrcWorkspace {
 impl fmt::Display for RustLibSrcWorkspace {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            RustLibSrcWorkspace::Workspace(ws) => write!(f, "workspace {}", ws.workspace_root()),
+            RustLibSrcWorkspace::Workspace { ws, .. } => {
+                write!(f, "workspace {}", ws.workspace_root())
+            }
             RustLibSrcWorkspace::Json(json) => write!(f, "json {}", json.manifest_or_root()),
             RustLibSrcWorkspace::Stitched(stitched) => {
                 write!(f, "stitched with {} crates", stitched.crates.len())
@@ -74,7 +76,7 @@ impl Sysroot {
 
     pub fn is_rust_lib_src_empty(&self) -> bool {
         match &self.workspace {
-            RustLibSrcWorkspace::Workspace(ws) => ws.packages().next().is_none(),
+            RustLibSrcWorkspace::Workspace { ws, .. } => ws.packages().next().is_none(),
             RustLibSrcWorkspace::Json(project_json) => project_json.n_crates() == 0,
             RustLibSrcWorkspace::Stitched(stitched) => stitched.crates.is_empty(),
             RustLibSrcWorkspace::Empty => true,
@@ -85,9 +87,16 @@ impl Sysroot {
         self.error.as_deref()
     }
 
+    pub fn metadata_error(&self) -> Option<&str> {
+        match &self.workspace {
+            RustLibSrcWorkspace::Workspace { metadata_err, .. } => metadata_err.as_deref(),
+            _ => None,
+        }
+    }
+
     pub fn num_packages(&self) -> usize {
         match &self.workspace {
-            RustLibSrcWorkspace::Workspace(ws) => ws.packages().count(),
+            RustLibSrcWorkspace::Workspace { ws, .. } => ws.packages().count(),
             RustLibSrcWorkspace::Json(project_json) => project_json.n_crates(),
             RustLibSrcWorkspace::Stitched(stitched) => stitched.crates.len(),
             RustLibSrcWorkspace::Empty => 0,
@@ -210,8 +219,6 @@ impl Sysroot {
         &self,
         sysroot_source_config: &RustSourceWorkspaceConfig,
         no_deps: bool,
-        current_dir: &AbsPath,
-        target_dir: &Utf8Path,
         progress: &dyn Fn(String),
     ) -> Option<RustLibSrcWorkspace> {
         assert!(matches!(self.workspace, RustLibSrcWorkspace::Empty), "workspace already loaded");
@@ -224,8 +231,7 @@ impl Sysroot {
             if fs::metadata(&library_manifest).is_ok() {
                 match self.load_library_via_cargo(
                     &library_manifest,
-                    current_dir,
-                    target_dir,
+                    src_root,
                     cargo_config,
                     no_deps,
                     progress,
@@ -294,7 +300,9 @@ impl Sysroot {
             && let Some(src_root) = &self.rust_lib_src_root
         {
             let has_core = match &self.workspace {
-                RustLibSrcWorkspace::Workspace(ws) => ws.packages().any(|p| ws[p].name == "core"),
+                RustLibSrcWorkspace::Workspace { ws: workspace, .. } => {
+                    workspace.packages().any(|p| workspace[p].name == "core")
+                }
                 RustLibSrcWorkspace::Json(project_json) => project_json
                     .crates()
                     .filter_map(|(_, krate)| krate.display_name.clone())
@@ -318,7 +326,6 @@ impl Sysroot {
         &self,
         library_manifest: &ManifestPath,
         current_dir: &AbsPath,
-        target_dir: &Utf8Path,
         cargo_config: &CargoMetadataConfig,
         no_deps: bool,
         progress: &dyn Fn(String),
@@ -333,9 +340,9 @@ impl Sysroot {
 
         // Make sure we never attempt to write to the sysroot
         let locked = true;
-        let (mut res, _) =
+        let (mut res, err) =
             FetchMetadata::new(library_manifest, current_dir, &cargo_config, self, no_deps)
-                .exec(target_dir, locked, progress)?;
+                .exec(locked, progress)?;
 
         // Patch out `rustc-std-workspace-*` crates to point to the real crates.
         // This is done prior to `CrateGraph` construction to prevent de-duplication logic from failing.
@@ -388,7 +395,10 @@ impl Sysroot {
 
         let cargo_workspace =
             CargoWorkspace::new(res, library_manifest.clone(), Default::default(), true);
-        Ok(RustLibSrcWorkspace::Workspace(cargo_workspace))
+        Ok(RustLibSrcWorkspace::Workspace {
+            ws: cargo_workspace,
+            metadata_err: err.map(|e| format!("{e:#}")),
+        })
     }
 }
 

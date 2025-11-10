@@ -8,9 +8,7 @@ use tracing::debug;
 
 use super::debugger::DebuggerCommands;
 use super::{Debugger, Emit, ProcRes, TestCx, Truncated, WillExecute};
-use crate::common::Config;
 use crate::debuggers::{extract_gdb_version, is_android_gdb_target};
-use crate::util::logv;
 
 impl TestCx<'_> {
     pub(super) fn run_debuginfo_test(&self) {
@@ -22,18 +20,6 @@ impl TestCx<'_> {
     }
 
     fn run_debuginfo_cdb_test(&self) {
-        let config = Config {
-            target_rustcflags: self.cleanup_debug_info_options(&self.config.target_rustcflags),
-            host_rustcflags: self.cleanup_debug_info_options(&self.config.host_rustcflags),
-            ..self.config.clone()
-        };
-
-        let test_cx = TestCx { config: &config, ..*self };
-
-        test_cx.run_debuginfo_cdb_test_no_opt();
-    }
-
-    fn run_debuginfo_cdb_test_no_opt(&self) {
         let exe_file = self.make_exe_name();
 
         // Existing PDB files are update in-place. When changing the debuginfo
@@ -60,7 +46,7 @@ impl TestCx<'_> {
         }
 
         // Parse debugger commands etc from test files
-        let dbg_cmds = DebuggerCommands::parse_from(&self.testpaths.file, self.config, "cdb")
+        let dbg_cmds = DebuggerCommands::parse_from(&self.testpaths.file, "cdb")
             .unwrap_or_else(|e| self.fatal(&e));
 
         // https://docs.microsoft.com/en-us/windows-hardware/drivers/debugger/debugger-commands
@@ -119,19 +105,7 @@ impl TestCx<'_> {
     }
 
     fn run_debuginfo_gdb_test(&self) {
-        let config = Config {
-            target_rustcflags: self.cleanup_debug_info_options(&self.config.target_rustcflags),
-            host_rustcflags: self.cleanup_debug_info_options(&self.config.host_rustcflags),
-            ..self.config.clone()
-        };
-
-        let test_cx = TestCx { config: &config, ..*self };
-
-        test_cx.run_debuginfo_gdb_test_no_opt();
-    }
-
-    fn run_debuginfo_gdb_test_no_opt(&self) {
-        let dbg_cmds = DebuggerCommands::parse_from(&self.testpaths.file, self.config, "gdb")
+        let dbg_cmds = DebuggerCommands::parse_from(&self.testpaths.file, "gdb")
             .unwrap_or_else(|e| self.fatal(&e));
         let mut cmds = dbg_cmds.commands.join("\n");
 
@@ -234,7 +208,7 @@ impl TestCx<'_> {
                 gdb.args(debugger_opts);
                 // FIXME(jieyouxu): don't pass an empty Path
                 let cmdline = self.make_cmdline(&gdb, Utf8Path::new(""));
-                logv(self.config, format!("executing {}", cmdline));
+                self.logv(format_args!("executing {cmdline}"));
                 cmdline
             };
 
@@ -246,7 +220,7 @@ impl TestCx<'_> {
                 cmdline,
             };
             if adb.kill().is_err() {
-                println!("Adb process is already finished.");
+                writeln!(self.stdout, "Adb process is already finished.");
             }
         } else {
             let rust_pp_module_abs_path = self.config.src_root.join("src").join("etc");
@@ -257,7 +231,11 @@ impl TestCx<'_> {
 
             match self.config.gdb_version {
                 Some(version) => {
-                    println!("NOTE: compiletest thinks it is using GDB version {}", version);
+                    writeln!(
+                        self.stdout,
+                        "NOTE: compiletest thinks it is using GDB version {}",
+                        version
+                    );
 
                     if !self.props.disable_gdb_pretty_printers
                         && version > extract_gdb_version("7.4").unwrap()
@@ -279,7 +257,8 @@ impl TestCx<'_> {
                     }
                 }
                 _ => {
-                    println!(
+                    writeln!(
+                        self.stdout,
                         "NOTE: compiletest does not know which version of \
                          GDB it is using"
                     );
@@ -351,18 +330,6 @@ impl TestCx<'_> {
             self.fatal("Can't run LLDB test because LLDB's python path is not set.");
         }
 
-        let config = Config {
-            target_rustcflags: self.cleanup_debug_info_options(&self.config.target_rustcflags),
-            host_rustcflags: self.cleanup_debug_info_options(&self.config.host_rustcflags),
-            ..self.config.clone()
-        };
-
-        let test_cx = TestCx { config: &config, ..*self };
-
-        test_cx.run_debuginfo_lldb_test_no_opt();
-    }
-
-    fn run_debuginfo_lldb_test_no_opt(&self) {
         // compile test file (it should have 'compile-flags:-g' in the directive)
         let should_run = self.run_if_enabled();
         let compile_result = self.compile_test(should_run, Emit::None);
@@ -377,10 +344,15 @@ impl TestCx<'_> {
 
         match self.config.lldb_version {
             Some(ref version) => {
-                println!("NOTE: compiletest thinks it is using LLDB version {}", version);
+                writeln!(
+                    self.stdout,
+                    "NOTE: compiletest thinks it is using LLDB version {}",
+                    version
+                );
             }
             _ => {
-                println!(
+                writeln!(
+                    self.stdout,
                     "NOTE: compiletest does not know which version of \
                      LLDB it is using"
                 );
@@ -388,12 +360,41 @@ impl TestCx<'_> {
         }
 
         // Parse debugger commands etc from test files
-        let dbg_cmds = DebuggerCommands::parse_from(&self.testpaths.file, self.config, "lldb")
+        let dbg_cmds = DebuggerCommands::parse_from(&self.testpaths.file, "lldb")
             .unwrap_or_else(|e| self.fatal(&e));
 
         // Write debugger script:
         // We don't want to hang when calling `quit` while the process is still running
         let mut script_str = String::from("settings set auto-confirm true\n");
+
+        // macOS has a system for restricting access to files and peripherals
+        // called Transparency, Consent, and Control (TCC), which can be
+        // configured using the "Security & Privacy" tab in your settings.
+        //
+        // This system is provenance-based: if Terminal.app is given access to
+        // your Desktop, and you launch a binary within Terminal.app, the new
+        // binary also has access to the files on your Desktop.
+        //
+        // By default though, LLDB launches binaries in very isolated
+        // contexts. This includes resetting any TCC grants that might
+        // otherwise have been inherited.
+        //
+        // In effect, this means that if the developer has placed the rust
+        // repository under one of the system-protected folders, they will get
+        // a pop-up _for each binary_ asking for permissions to access the
+        // folder - quite annoying.
+        //
+        // To avoid this, we tell LLDB to spawn processes with TCC grants
+        // inherited from the parent process.
+        //
+        // Setting this also avoids unnecessary overhead from XprotectService
+        // when running with the Developer Tool grant.
+        //
+        // TIP: If you want to allow launching `lldb ~/Desktop/my_binary`
+        // without being prompted, you can put this in your `~/.lldbinit` too.
+        if self.config.host.contains("darwin") {
+            script_str.push_str("settings set target.inherit-tcc true\n");
+        }
 
         // Make LLDB emit its version, so we have it documented in the test output
         script_str.push_str("version\n");
@@ -462,12 +463,5 @@ impl TestCx<'_> {
                 .env("PYTHONUNBUFFERED", "1") // Help debugging #78665
                 .env("PYTHONPATH", pythonpath),
         )
-    }
-
-    fn cleanup_debug_info_options(&self, options: &Vec<String>) -> Vec<String> {
-        // Remove options that are either unwanted (-O) or may lead to duplicates due to RUSTFLAGS.
-        let options_to_remove = ["-O".to_owned(), "-g".to_owned(), "--debuginfo".to_owned()];
-
-        options.iter().filter(|x| !options_to_remove.contains(x)).cloned().collect()
     }
 }

@@ -25,7 +25,6 @@
     any(target_arch = "powerpc", target_arch = "powerpc64"),
     feature(stdarch_powerpc_feature_detection)
 )]
-#![cfg_attr(target_arch = "s390x", feature(stdarch_s390x_feature_detection))]
 #![cfg_attr(
     any(target_arch = "riscv32", target_arch = "riscv64"),
     feature(stdarch_riscv_feature_detection)
@@ -69,6 +68,8 @@ fn aarch64() {
 #[test]
 #[cfg(any(target_arch = "loongarch32", target_arch = "loongarch64"))]
 fn loongarch() {
+    let _ = is_loongarch_feature_detected!("32s");
+    let _ = is_loongarch_feature_detected!("32s",);
     let _ = is_loongarch_feature_detected!("lsx");
     let _ = is_loongarch_feature_detected!("lsx",);
 }

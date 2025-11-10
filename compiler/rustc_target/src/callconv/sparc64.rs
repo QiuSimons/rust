@@ -29,7 +29,7 @@ where
 
     data.has_float = true;
 
-    if !data.last_offset.is_aligned(dl.f64_align.abi) && data.last_offset < offset {
+    if !data.last_offset.is_aligned(dl.f64_align) && data.last_offset < offset {
         if data.prefix_index == data.prefix.len() {
             return data;
         }
@@ -140,6 +140,10 @@ where
     Ty: TyAbiInterface<'a, C> + Copy,
     C: HasDataLayout,
 {
+    if arg.layout.pass_indirectly_in_non_rustic_abis(cx) {
+        arg.make_indirect();
+        return;
+    }
     if !arg.layout.is_aggregate() {
         arg.extend_integer_width_to(64);
         return;

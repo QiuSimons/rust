@@ -20,7 +20,7 @@ use crate::{
     config::Config,
     diagnostics::{DiagnosticsGeneration, NativeDiagnosticsFetchKind, fetch_native_diagnostics},
     discover::{DiscoverArgument, DiscoverCommand, DiscoverProjectMessage},
-    flycheck::{self, FlycheckMessage},
+    flycheck::{self, ClearDiagnosticsKind, ClearScope, FlycheckMessage},
     global_state::{
         FetchBuildDataResponse, FetchWorkspaceRequest, FetchWorkspaceResponse, GlobalState,
         file_id_to_url, url_to_file_id,
@@ -58,6 +58,14 @@ pub fn main_loop(config: Config, connection: Connection) -> anyhow::Result<()> {
         let thread = GetCurrentThread();
         let thread_priority_above_normal = 1;
         SetThreadPriority(thread, thread_priority_above_normal);
+    }
+
+    #[cfg(feature = "dhat")]
+    {
+        if let Some(dhat_output_file) = config.dhat_output_file() {
+            *crate::DHAT_PROFILER.lock().unwrap() =
+                Some(dhat::Profiler::builder().file_name(&dhat_output_file).build());
+        }
     }
 
     GlobalState::new(connection.sender, config).run(connection.receiver)
@@ -812,7 +820,7 @@ impl GlobalState {
                 };
 
                 if let Some(state) = state {
-                    self.report_progress("Building build-artifacts", state, msg, None, None);
+                    self.report_progress("Building compile-time-deps", state, msg, None, None);
                 }
             }
             Task::LoadProcMacros(progress) => {
@@ -847,6 +855,13 @@ impl GlobalState {
                 self.debounce_workspace_fetch();
                 let vfs = &mut self.vfs.write().0;
                 for (path, contents) in files {
+                    if matches!(path.name_and_extension(), Some(("minicore", Some("rs")))) {
+                        // Not a lot of bad can happen from mistakenly identifying `minicore`, so proceed with that.
+                        self.minicore.minicore_text = contents
+                            .as_ref()
+                            .and_then(|contents| String::from_utf8(contents.clone()).ok());
+                    }
+
                     let path = VfsPath::from(path);
                     // if the file is in mem docs, it's managed by the client via notifications
                     // so only set it if its not in there
@@ -1008,11 +1023,17 @@ impl GlobalState {
 
     fn handle_flycheck_msg(&mut self, message: FlycheckMessage) {
         match message {
-            FlycheckMessage::AddDiagnostic { id, workspace_root, diagnostic, package_id } => {
+            FlycheckMessage::AddDiagnostic {
+                id,
+                generation,
+                workspace_root,
+                diagnostic,
+                package_id,
+            } => {
                 let snap = self.snapshot();
-                let diagnostics = crate::diagnostics::to_proto::map_rust_diagnostic_to_lsp(
+                let diagnostics = crate::diagnostics::flycheck_to_proto::map_rust_diagnostic_to_lsp(
                     &self.config.diagnostics_map(None),
-                    &diagnostic,
+                    diagnostic,
                     &workspace_root,
                     &snap,
                 );
@@ -1020,6 +1041,7 @@ impl GlobalState {
                     match url_to_file_id(&self.vfs.read().0, &diag.url) {
                         Ok(Some(file_id)) => self.diagnostics.add_check_diagnostic(
                             id,
+                            generation,
                             &package_id,
                             file_id,
                             diag.diagnostic,
@@ -1035,12 +1057,22 @@ impl GlobalState {
                     };
                 }
             }
-            FlycheckMessage::ClearDiagnostics { id, package_id: None } => {
-                self.diagnostics.clear_check(id)
-            }
-            FlycheckMessage::ClearDiagnostics { id, package_id: Some(package_id) } => {
-                self.diagnostics.clear_check_for_package(id, package_id)
-            }
+            FlycheckMessage::ClearDiagnostics {
+                id,
+                kind: ClearDiagnosticsKind::All(ClearScope::Workspace),
+            } => self.diagnostics.clear_check(id),
+            FlycheckMessage::ClearDiagnostics {
+                id,
+                kind: ClearDiagnosticsKind::All(ClearScope::Package(package_id)),
+            } => self.diagnostics.clear_check_for_package(id, package_id),
+            FlycheckMessage::ClearDiagnostics {
+                id,
+                kind: ClearDiagnosticsKind::OlderThan(generation, ClearScope::Workspace),
+            } => self.diagnostics.clear_check_older_than(id, generation),
+            FlycheckMessage::ClearDiagnostics {
+                id,
+                kind: ClearDiagnosticsKind::OlderThan(generation, ClearScope::Package(package_id)),
+            } => self.diagnostics.clear_check_older_than_for_package(id, package_id, generation),
             FlycheckMessage::Progress { id, progress } => {
                 let (state, message) = match progress {
                     flycheck::Progress::DidStart => (Progress::Begin, None),

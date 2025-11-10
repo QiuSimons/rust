@@ -1,5 +1,5 @@
 // ignore-tidy-linelength
-//@ add-core-stubs
+//@ add-minicore
 //@ revisions:i686-linux x86_64-linux
 
 //@ compile-flags: -Cno-prepopulate-passes -Copt-level=1 -Cpanic=abort
@@ -55,10 +55,10 @@ extern "C" {
 pub unsafe fn rust_to_c_increases_alignment(x: Align1) {
     // i686-linux: start:
     // i686-linux-NEXT: [[ALLOCA:%[0-9a-z]+]] = alloca [48 x i8], align 4
-    // i686-linux-NEXT: call void @llvm.lifetime.start.p0(i64 48, ptr {{.*}}[[ALLOCA]])
+    // i686-linux-NEXT: call void @llvm.lifetime.start.p0({{(i64 48, )?}}ptr {{.*}}[[ALLOCA]])
     // i686-linux-NEXT: call void @llvm.memcpy.{{.+}}(ptr {{.*}}align 4 {{.*}}[[ALLOCA]], ptr {{.*}}align 1 {{.*}}%x
     // i686-linux-NEXT: call void @extern_c_align1({{.+}} [[ALLOCA]])
-    // i686-linux-NEXT: call void @llvm.lifetime.end.p0(i64 48, ptr {{.*}}[[ALLOCA]])
+    // i686-linux-NEXT: call void @llvm.lifetime.end.p0({{(i64 48, )?}}ptr {{.*}}[[ALLOCA]])
 
     // x86_64-linux: start:
     // x86_64-linux-NEXT: call void @extern_c_align1

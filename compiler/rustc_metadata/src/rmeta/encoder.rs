@@ -22,7 +22,7 @@ use rustc_middle::middle::dependency_format::Linkage;
 use rustc_middle::mir::interpret;
 use rustc_middle::query::Providers;
 use rustc_middle::traits::specialization_graph;
-use rustc_middle::ty::AssocItemContainer;
+use rustc_middle::ty::AssocContainer;
 use rustc_middle::ty::codec::TyEncoder;
 use rustc_middle::ty::fast_reject::{self, TreatParams};
 use rustc_middle::{bug, span_bug};
@@ -1254,8 +1254,8 @@ fn should_encode_type(tcx: TyCtxt<'_>, def_id: LocalDefId, def_kind: DefKind) ->
         DefKind::AssocTy => {
             let assoc_item = tcx.associated_item(def_id);
             match assoc_item.container {
-                ty::AssocItemContainer::Impl => true,
-                ty::AssocItemContainer::Trait => assoc_item.defaultness(tcx).has_value(),
+                ty::AssocContainer::InherentImpl | ty::AssocContainer::TraitImpl(_) => true,
+                ty::AssocContainer::Trait => assoc_item.defaultness(tcx).has_value(),
             }
         }
         DefKind::TyParam => {
@@ -1350,6 +1350,7 @@ fn should_encode_constness(def_kind: DefKind) -> bool {
 
 fn should_encode_const(def_kind: DefKind) -> bool {
     match def_kind {
+        // FIXME(mgca): should we remove Const and AssocConst here?
         DefKind::Const | DefKind::AssocConst | DefKind::AnonConst | DefKind::InlineConst => true,
 
         DefKind::Struct
@@ -1379,6 +1380,21 @@ fn should_encode_const(def_kind: DefKind) -> bool {
         | DefKind::GlobalAsm
         | DefKind::ExternCrate
         | DefKind::SyntheticCoroutineBody => false,
+    }
+}
+
+fn should_encode_const_of_item<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, def_kind: DefKind) -> bool {
+    matches!(def_kind, DefKind::Const | DefKind::AssocConst)
+        && find_attr!(tcx.get_all_attrs(def_id), AttributeKind::TypeConst(_))
+        // AssocConst ==> assoc item has value
+        && (!matches!(def_kind, DefKind::AssocConst) || assoc_item_has_value(tcx, def_id))
+}
+
+fn assoc_item_has_value<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) -> bool {
+    let assoc_item = tcx.associated_item(def_id);
+    match assoc_item.container {
+        ty::AssocContainer::InherentImpl | ty::AssocContainer::TraitImpl(_) => true,
+        ty::AssocContainer::Trait => assoc_item.defaultness(tcx).has_value(),
     }
 }
 
@@ -1428,7 +1444,9 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 && match tcx.hir_node_by_def_id(local_id) {
                     hir::Node::ConstArg(hir::ConstArg { kind, .. }) => match kind {
                         // Skip encoding defs for these as they should not have had a `DefId` created
-                        hir::ConstArgKind::Path(..) | hir::ConstArgKind::Infer(..) => true,
+                        hir::ConstArgKind::Error(..)
+                        | hir::ConstArgKind::Path(..)
+                        | hir::ConstArgKind::Infer(..) => true,
                         hir::ConstArgKind::Anon(..) => false,
                     },
                     _ => false,
@@ -1601,6 +1619,9 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
             if let DefKind::AnonConst = def_kind {
                 record!(self.tables.anon_const_kind[def_id] <- self.tcx.anon_const_kind(def_id));
             }
+            if should_encode_const_of_item(self.tcx, def_id, def_kind) {
+                record!(self.tables.const_of_item[def_id] <- self.tcx.const_of_item(def_id));
+            }
             if tcx.impl_method_has_trait_impl_trait_tys(def_id)
                 && let Ok(table) = self.tcx.collect_return_position_impl_trait_in_trait_tys(def_id)
             {
@@ -1725,24 +1746,20 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
         let tcx = self.tcx;
         let item = tcx.associated_item(def_id);
 
-        self.tables.defaultness.set_some(def_id.index, item.defaultness(tcx));
-        self.tables.assoc_container.set_some(def_id.index, item.container);
+        if matches!(item.container, AssocContainer::Trait | AssocContainer::TraitImpl(_)) {
+            self.tables.defaultness.set_some(def_id.index, item.defaultness(tcx));
+        }
 
-        match item.container {
-            AssocItemContainer::Trait => {
-                if item.is_type() {
-                    self.encode_explicit_item_bounds(def_id);
-                    self.encode_explicit_item_self_bounds(def_id);
-                    if tcx.is_conditionally_const(def_id) {
-                        record_defaulted_array!(self.tables.explicit_implied_const_bounds[def_id]
-                            <- self.tcx.explicit_implied_const_bounds(def_id).skip_binder());
-                    }
-                }
-            }
-            AssocItemContainer::Impl => {
-                if let Some(trait_item_def_id) = item.trait_item_def_id {
-                    self.tables.trait_item_def_id.set_some(def_id.index, trait_item_def_id.into());
-                }
+        record!(self.tables.assoc_container[def_id] <- item.container);
+
+        if let AssocContainer::Trait = item.container
+            && item.is_type()
+        {
+            self.encode_explicit_item_bounds(def_id);
+            self.encode_explicit_item_self_bounds(def_id);
+            if tcx.is_conditionally_const(def_id) {
+                record_defaulted_array!(self.tables.explicit_implied_const_bounds[def_id]
+                    <- self.tcx.explicit_implied_const_bounds(def_id).skip_binder());
             }
         }
         if let ty::AssocKind::Type { data: ty::AssocTypeData::Rpitit(rpitit_info) } = item.kind {
@@ -1795,8 +1812,15 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                     record!(self.tables.mir_coroutine_witnesses[def_id.to_def_id()] <- witnesses);
                 }
             }
+            let mut is_trivial = false;
             if encode_const {
-                record!(self.tables.mir_for_ctfe[def_id.to_def_id()] <- tcx.mir_for_ctfe(def_id));
+                if let Some((val, ty)) = tcx.trivial_const(def_id) {
+                    is_trivial = true;
+                    record!(self.tables.trivial_const[def_id.to_def_id()] <- (val, ty));
+                } else {
+                    is_trivial = false;
+                    record!(self.tables.mir_for_ctfe[def_id.to_def_id()] <- tcx.mir_for_ctfe(def_id));
+                }
 
                 // FIXME(generic_const_exprs): this feels wrong to have in `encode_mir`
                 let abstract_const = tcx.thir_abstract_const(def_id);
@@ -1814,7 +1838,9 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                     }
                 }
             }
-            record!(self.tables.promoted_mir[def_id.to_def_id()] <- tcx.promoted_mir(def_id));
+            if !is_trivial {
+                record!(self.tables.promoted_mir[def_id.to_def_id()] <- tcx.promoted_mir(def_id));
+            }
 
             if self.tcx.is_coroutine(def_id.to_def_id())
                 && let Some(witnesses) = tcx.mir_coroutine_witnesses(def_id)
@@ -1981,7 +2007,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 def_key.disambiguated_data.data = DefPathData::MacroNs(name);
 
                 let def_id = id.to_def_id();
-                self.tables.def_kind.set_some(def_id.index, DefKind::Macro(macro_kind));
+                self.tables.def_kind.set_some(def_id.index, DefKind::Macro(macro_kind.into()));
                 self.tables.proc_macro.set_some(def_id.index, macro_kind);
                 self.encode_attrs(id);
                 record!(self.tables.def_keys[def_id] <- def_key);
@@ -2119,7 +2145,8 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
             };
             let def_id = id.owner_id.to_def_id();
 
-            if of_trait && let Some(header) = tcx.impl_trait_header(def_id) {
+            if of_trait {
+                let header = tcx.impl_trait_header(def_id);
                 record!(self.tables.impl_trait_header[def_id] <- header);
 
                 self.tables.defaultness.set_some(def_id.index, tcx.defaultness(def_id));
@@ -2237,6 +2264,9 @@ fn prefetch_mir(tcx: TyCtxt<'_>) {
 
     let reachable_set = tcx.reachable_set(());
     par_for_each_in(tcx.mir_keys(()), |&&def_id| {
+        if tcx.is_trivial_const(def_id) {
+            return;
+        }
         let (encode_const, encode_opt) = should_encode_mir(tcx, reachable_set, def_id);
 
         if encode_const {
@@ -2589,8 +2619,6 @@ pub fn rendered_const<'tcx>(tcx: TyCtxt<'tcx>, body: &hir::Body<'_>, def_id: Loc
             // FIXME: Claiming that those kinds of QPaths are simple is probably not true if the Ty
             //        contains const arguments. Is there a *concise* way to check for this?
             hir::ExprKind::Path(hir::QPath::TypeRelative(..)) => Simple,
-            // FIXME: Can they contain const arguments and thus leak private struct fields?
-            hir::ExprKind::Path(hir::QPath::LangItem(..)) => Simple,
             _ => Complex,
         }
     }

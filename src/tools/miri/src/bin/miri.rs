@@ -8,11 +8,6 @@
     rustc::untranslatable_diagnostic
 )]
 
-// Some "regular" crates we want to share with rustc
-extern crate tracing;
-#[cfg(feature = "tracing")]
-extern crate tracing_subscriber;
-
 // The rustc crates we need
 extern crate rustc_abi;
 extern crate rustc_data_structures;
@@ -21,7 +16,6 @@ extern crate rustc_hir;
 extern crate rustc_hir_analysis;
 extern crate rustc_interface;
 extern crate rustc_log;
-extern crate rustc_metadata;
 extern crate rustc_middle;
 extern crate rustc_session;
 extern crate rustc_span;
@@ -31,15 +25,13 @@ mod log;
 use std::env;
 use std::num::NonZero;
 use std::ops::Range;
-use std::path::PathBuf;
 use std::rc::Rc;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 
 use miri::{
     BacktraceStyle, BorrowTrackerMethod, GenmcConfig, GenmcCtx, MiriConfig, MiriEntryFnType,
-    ProvenanceMode, RetagFields, TreeBorrowsParams, ValidationMode,
+    ProvenanceMode, RetagFields, TreeBorrowsParams, ValidationMode, run_genmc_mode,
 };
 use rustc_abi::ExternAbi;
 use rustc_data_structures::sync;
@@ -48,6 +40,7 @@ use rustc_hir::def_id::LOCAL_CRATE;
 use rustc_hir::{self as hir, Node};
 use rustc_hir_analysis::check::check_function_signature;
 use rustc_interface::interface::Config;
+use rustc_log::tracing::debug;
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use rustc_middle::middle::exported_symbols::{
     ExportedSymbol, SymbolExportInfo, SymbolExportKind, SymbolExportLevel,
@@ -55,12 +48,9 @@ use rustc_middle::middle::exported_symbols::{
 use rustc_middle::query::LocalCrate;
 use rustc_middle::traits::{ObligationCause, ObligationCauseCode};
 use rustc_middle::ty::{self, Ty, TyCtxt};
-use rustc_middle::util::Providers;
 use rustc_session::EarlyDiagCtxt;
 use rustc_session::config::{CrateType, ErrorOutputType, OptLevel};
-use rustc_session::search_paths::PathKind;
 use rustc_span::def_id::DefId;
-use tracing::debug;
 
 use crate::log::setup::{deinit_loggers, init_early_loggers, init_late_loggers};
 
@@ -131,21 +121,6 @@ fn entry_fn(tcx: TyCtxt<'_>) -> (DefId, MiriEntryFnType) {
 }
 
 impl rustc_driver::Callbacks for MiriCompilerCalls {
-    fn config(&mut self, config: &mut Config) {
-        config.override_queries = Some(|_, providers| {
-            providers.extern_queries.used_crate_source = |tcx, cnum| {
-                let mut providers = Providers::default();
-                rustc_metadata::provide(&mut providers);
-                let mut crate_source = (providers.extern_queries.used_crate_source)(tcx, cnum);
-                // HACK: rustc will emit "crate ... required to be available in rlib format, but
-                // was not found in this form" errors once we use `tcx.dependency_formats()` if
-                // there's no rlib provided, so setting a dummy path here to workaround those errors.
-                Arc::make_mut(&mut crate_source).rlib = Some((PathBuf::new(), PathKind::All));
-                crate_source
-            };
-        });
-    }
-
     fn after_analysis<'tcx>(
         &mut self,
         _: &rustc_interface::interface::Compiler,
@@ -186,10 +161,23 @@ impl rustc_driver::Callbacks for MiriCompilerCalls {
                     optimizations is usually marginal at best.");
         }
 
-        if let Some(_genmc_config) = &config.genmc_config {
-            let _genmc_ctx = Rc::new(GenmcCtx::new(&config));
+        // Run in GenMC mode if enabled.
+        if config.genmc_config.is_some() {
+            // Validate GenMC settings.
+            if let Err(err) = GenmcConfig::validate(&mut config, tcx) {
+                fatal_error!("Invalid settings: {err}");
+            }
 
-            todo!("GenMC mode not yet implemented");
+            // This is the entry point used in GenMC mode.
+            // This closure will be called multiple times to explore the concurrent execution space of the program.
+            let eval_entry_once = |genmc_ctx: Rc<GenmcCtx>| {
+                miri::eval_entry(tcx, entry_def_id, entry_type, &config, Some(genmc_ctx))
+            };
+            let return_code = run_genmc_mode(&config, eval_entry_once, tcx).unwrap_or_else(|| {
+                tcx.dcx().abort_if_errors();
+                rustc_driver::EXIT_FAILURE
+            });
+            exit(return_code);
         };
 
         if let Some(many_seeds) = self.many_seeds.take() {
@@ -245,12 +233,26 @@ impl rustc_driver::Callbacks for MiriBeRustCompilerCalls {
     #[allow(rustc::potential_query_instability)] // rustc_codegen_ssa (where this code is copied from) also allows this lint
     fn config(&mut self, config: &mut Config) {
         if config.opts.prints.is_empty() && self.target_crate {
+            #[allow(rustc::bad_opt_access)] // tcx does not exist yet
+            {
+                let any_crate_types = !config.opts.crate_types.is_empty();
+                // Avoid warnings about unsupported crate types.
+                config
+                    .opts
+                    .crate_types
+                    .retain(|&c| c == CrateType::Executable || c == CrateType::Rlib);
+                if any_crate_types {
+                    // Assert that we didn't remove all crate types if any crate type was passed on
+                    // the cli. Otherwise we might silently change what kind of crate we are building.
+                    assert!(!config.opts.crate_types.is_empty());
+                }
+            }
+
             // Queries overridden here affect the data stored in `rmeta` files of dependencies,
             // which will be used later in non-`MIRI_BE_RUSTC` mode.
             config.override_queries = Some(|_, local_providers| {
-                // `exported_non_generic_symbols` and `reachable_non_generics` provided by rustc always returns
-                // an empty result if `tcx.sess.opts.output_types.should_codegen()` is false.
-                // In addition we need to add #[used] symbols to exported_symbols for `lookup_link_section`.
+                // We need to add #[used] symbols to exported_symbols for `lookup_link_section`.
+                // FIXME handle this somehow in rustc itself to avoid this hack.
                 local_providers.exported_non_generic_symbols = |tcx, LocalCrate| {
                     let reachable_set = tcx.with_stable_hashing_context(|hcx| {
                         tcx.reachable_set(()).to_sorted(&hcx, true)
@@ -279,7 +281,7 @@ impl rustc_driver::Callbacks for MiriBeRustCompilerCalls {
                                 return None;
                             }
                             let codegen_fn_attrs = tcx.codegen_fn_attrs(local_def_id);
-                            if codegen_fn_attrs.contains_extern_indicator(tcx, local_def_id.into())
+                            if codegen_fn_attrs.contains_extern_indicator()
                                 || codegen_fn_attrs
                                     .flags
                                     .contains(CodegenFnAttrFlags::USED_COMPILER)
@@ -344,6 +346,7 @@ fn fatal_error_(msg: &impl std::fmt::Display) -> ! {
 macro_rules! fatal_error {
     ($($tt:tt)*) => { $crate::fatal_error_(&format_args!($($tt)*)) };
 }
+#[allow(unused)] // use depends on cfg
 use fatal_error;
 
 /// Execute a compiler with the given CLI arguments and callbacks.
@@ -556,7 +559,11 @@ fn main() {
         } else if arg == "-Zmiri-deterministic-floats" {
             miri_config.float_nondet = false;
         } else if arg == "-Zmiri-no-extra-rounding-error" {
-            miri_config.float_rounding_error = false;
+            miri_config.float_rounding_error = miri::FloatRoundingErrorMode::None;
+        } else if arg == "-Zmiri-max-extra-rounding-error" {
+            miri_config.float_rounding_error = miri::FloatRoundingErrorMode::Max;
+        } else if arg == "-Zmiri-no-short-fd-operations" {
+            miri_config.short_fd_operations = false;
         } else if arg == "-Zmiri-strict-provenance" {
             miri_config.provenance_mode = ProvenanceMode::Strict;
         } else if arg == "-Zmiri-permissive-provenance" {
@@ -697,6 +704,8 @@ fn main() {
                 fatal_error!("-Zmiri-force-page-size requires a power of 2: {page_size}");
             };
             miri_config.page_size = Some(page_size);
+        } else if let Some(param) = arg.strip_prefix("-Zmiri-user-relevant-crates=") {
+            miri_config.user_relevant_crates.extend(param.split(',').map(|s| s.to_owned()));
         } else {
             // Forward to rustc.
             rustc_args.push(arg);
@@ -732,20 +741,7 @@ fn main() {
     let many_seeds =
         many_seeds.map(|seeds| ManySeedsConfig { seeds, keep_going: many_seeds_keep_going });
 
-    // Validate settings for data race detection and GenMC mode.
-    if miri_config.genmc_config.is_some() {
-        if !miri_config.data_race_detector {
-            fatal_error!("Cannot disable data race detection in GenMC mode (currently)");
-        } else if !miri_config.weak_memory_emulation {
-            fatal_error!("Cannot disable weak memory emulation in GenMC mode");
-        }
-        if miri_config.borrow_tracker.is_some() {
-            eprintln!(
-                "warning: borrow tracking has been disabled, it is not (yet) supported in GenMC mode."
-            );
-            miri_config.borrow_tracker = None;
-        }
-    } else if miri_config.weak_memory_emulation && !miri_config.data_race_detector {
+    if miri_config.weak_memory_emulation && !miri_config.data_race_detector {
         fatal_error!(
             "Weak memory emulation cannot be enabled when the data race detector is disabled"
         );

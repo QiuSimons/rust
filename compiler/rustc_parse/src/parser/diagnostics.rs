@@ -2,13 +2,12 @@ use std::mem::take;
 use std::ops::{Deref, DerefMut};
 
 use ast::token::IdentIsRaw;
-use rustc_ast as ast;
 use rustc_ast::token::{self, Lit, LitKind, Token, TokenKind};
 use rustc_ast::util::parser::AssocOp;
 use rustc_ast::{
-    AngleBracketedArg, AngleBracketedArgs, AnonConst, AttrVec, BinOpKind, BindingMode, Block,
-    BlockCheckMode, Expr, ExprKind, GenericArg, Generics, Item, ItemKind, Param, Pat, PatKind,
-    Path, PathSegment, QSelf, Recovered, Ty, TyKind,
+    self as ast, AngleBracketedArg, AngleBracketedArgs, AnonConst, AttrVec, BinOpKind, BindingMode,
+    Block, BlockCheckMode, Expr, ExprKind, GenericArg, Generics, Item, ItemKind, Param, Pat,
+    PatKind, Path, PathSegment, QSelf, Recovered, Ty, TyKind,
 };
 use rustc_ast_pretty::pprust;
 use rustc_data_structures::fx::FxHashSet;
@@ -44,6 +43,7 @@ use crate::errors::{
     UnexpectedConstParamDeclaration, UnexpectedConstParamDeclarationSugg, UnmatchedAngleBrackets,
     UseEqInstead, WrapType,
 };
+use crate::parser::FnContext;
 use crate::parser::attr::InnerAttrPolicy;
 use crate::{exp, fluent_generated as fluent};
 
@@ -70,6 +70,16 @@ pub(super) trait RecoverQPath: Sized + 'static {
     const PATH_STYLE: PathStyle = PathStyle::Expr;
     fn to_ty(&self) -> Option<Box<Ty>>;
     fn recovered(qself: Option<Box<QSelf>>, path: ast::Path) -> Self;
+}
+
+impl<T: RecoverQPath> RecoverQPath for Box<T> {
+    const PATH_STYLE: PathStyle = T::PATH_STYLE;
+    fn to_ty(&self) -> Option<Box<Ty>> {
+        T::to_ty(self)
+    }
+    fn recovered(qself: Option<Box<QSelf>>, path: ast::Path) -> Self {
+        Box::new(T::recovered(qself, path))
+    }
 }
 
 impl RecoverQPath for Ty {
@@ -462,8 +472,8 @@ impl<'a> Parser<'a> {
 
     pub(super) fn expected_one_of_not_found(
         &mut self,
-        edible: &[ExpTokenPair<'_>],
-        inedible: &[ExpTokenPair<'_>],
+        edible: &[ExpTokenPair],
+        inedible: &[ExpTokenPair],
     ) -> PResult<'a, ErrorGuaranteed> {
         debug!("expected_one_of_not_found(edible: {:?}, inedible: {:?})", edible, inedible);
         fn tokens_to_string(tokens: &[TokenType]) -> String {
@@ -1091,7 +1101,7 @@ impl<'a> Parser<'a> {
 
     /// Eats and discards tokens until one of `closes` is encountered. Respects token trees,
     /// passes through any errors encountered. Used for error recovery.
-    pub(super) fn eat_to_tokens(&mut self, closes: &[ExpTokenPair<'_>]) {
+    pub(super) fn eat_to_tokens(&mut self, closes: &[ExpTokenPair]) {
         if let Err(err) = self
             .parse_seq_to_before_tokens(closes, &[], SeqSep::none(), |p| Ok(p.parse_token_tree()))
         {
@@ -1112,7 +1122,7 @@ impl<'a> Parser<'a> {
     pub(super) fn check_trailing_angle_brackets(
         &mut self,
         segment: &PathSegment,
-        end: &[ExpTokenPair<'_>],
+        end: &[ExpTokenPair],
     ) -> Option<ErrorGuaranteed> {
         if !self.may_recover() {
             return None;
@@ -1195,7 +1205,7 @@ impl<'a> Parser<'a> {
         // second case.
         if self.look_ahead(position, |t| {
             trace!("check_trailing_angle_brackets: t={:?}", t);
-            end.iter().any(|exp| exp.tok == &t.kind)
+            end.iter().any(|exp| exp.tok == t.kind)
         }) {
             // Eat from where we started until the end token so that parsing can continue
             // as if we didn't have those extra angle brackets.
@@ -1832,17 +1842,19 @@ impl<'a> Parser<'a> {
     /// tail, and combines them into a `<Ty>::AssocItem` expression/pattern/type.
     pub(super) fn maybe_recover_from_bad_qpath<T: RecoverQPath>(
         &mut self,
-        base: Box<T>,
-    ) -> PResult<'a, Box<T>> {
-        if !self.may_recover() {
-            return Ok(base);
-        }
-
+        base: T,
+    ) -> PResult<'a, T> {
         // Do not add `::` to expected tokens.
-        if self.token == token::PathSep {
-            if let Some(ty) = base.to_ty() {
-                return self.maybe_recover_from_bad_qpath_stage_2(ty.span, ty);
-            }
+        if self.may_recover() && self.token == token::PathSep {
+            return self.recover_from_bad_qpath(base);
+        }
+        Ok(base)
+    }
+
+    #[cold]
+    fn recover_from_bad_qpath<T: RecoverQPath>(&mut self, base: T) -> PResult<'a, T> {
+        if let Some(ty) = base.to_ty() {
+            return self.maybe_recover_from_bad_qpath_stage_2(ty.span, ty);
         }
         Ok(base)
     }
@@ -1853,7 +1865,7 @@ impl<'a> Parser<'a> {
         &mut self,
         ty_span: Span,
         ty: Box<Ty>,
-    ) -> PResult<'a, Box<T>> {
+    ) -> PResult<'a, T> {
         self.expect(exp!(PathSep))?;
 
         let mut path = ast::Path { segments: ThinVec::new(), span: DUMMY_SP, tokens: None };
@@ -1866,7 +1878,7 @@ impl<'a> Parser<'a> {
         });
 
         let path_span = ty_span.shrink_to_hi(); // Use an empty path since `position == 0`.
-        Ok(Box::new(T::recovered(Some(Box::new(QSelf { ty, path_span, position: 0 })), path)))
+        Ok(T::recovered(Some(Box::new(QSelf { ty, path_span, position: 0 })), path))
     }
 
     /// This function gets called in places where a semicolon is NOT expected and if there's a
@@ -2119,8 +2131,8 @@ impl<'a> Parser<'a> {
 
     pub(super) fn recover_seq_parse_error(
         &mut self,
-        open: ExpTokenPair<'_>,
-        close: ExpTokenPair<'_>,
+        open: ExpTokenPair,
+        close: ExpTokenPair,
         lo: Span,
         err: Diag<'a>,
     ) -> Box<Expr> {
@@ -2246,6 +2258,7 @@ impl<'a> Parser<'a> {
         pat: Box<ast::Pat>,
         require_name: bool,
         first_param: bool,
+        fn_parse_mode: &crate::parser::item::FnParseMode,
     ) -> Option<Ident> {
         // If we find a pattern followed by an identifier, it could be an (incorrect)
         // C-style parameter declaration.
@@ -2268,7 +2281,14 @@ impl<'a> Parser<'a> {
                 || self.token == token::Lt
                 || self.token == token::CloseParen)
         {
-            let rfc_note = "anonymous parameters are removed in the 2018 edition (see RFC 1685)";
+            let maybe_emit_anon_params_note = |this: &mut Self, err: &mut Diag<'_>| {
+                let ed = this.token.span.with_neighbor(this.prev_token.span).edition();
+                if matches!(fn_parse_mode.context, crate::parser::item::FnContext::Trait)
+                    && (fn_parse_mode.req_name)(ed)
+                {
+                    err.note("anonymous parameters are removed in the 2018 edition (see RFC 1685)");
+                }
+            };
 
             let (ident, self_sugg, param_sugg, type_sugg, self_span, param_span, type_span) =
                 match pat.kind {
@@ -2281,6 +2301,38 @@ impl<'a> Parser<'a> {
                         pat.span.shrink_to_hi(),
                         pat.span.shrink_to_lo(),
                     ),
+                    PatKind::Ref(ref inner_pat, _)
+                    // Fix suggestions for multi-reference `self` parameters (e.g. `&&&self`)
+                    // cc: https://github.com/rust-lang/rust/pull/146305
+                        if let PatKind::Ref(_, _) = &inner_pat.kind
+                            && let PatKind::Path(_, path) = &pat.peel_refs().kind
+                            && let [a, ..] = path.segments.as_slice()
+                            && a.ident.name == kw::SelfLower =>
+                    {
+                        let mut inner = inner_pat;
+                        let mut span_vec = vec![pat.span];
+
+                        while let PatKind::Ref(ref inner_type, _) = inner.kind {
+                            inner = inner_type;
+                            span_vec.push(inner.span.shrink_to_lo());
+                        }
+
+                        let span = match span_vec.len() {
+                            // Should be unreachable: match guard ensures at least 2 references
+                            0 | 1 => unreachable!(),
+                            2 => span_vec[0].until(inner_pat.span.shrink_to_lo()),
+                            _ => span_vec[0].until(span_vec[span_vec.len() - 2].shrink_to_lo()),
+                        };
+
+                        err.span_suggestion_verbose(
+                            span,
+                            "`self` should be `self`, `&self` or `&mut self`, consider removing extra references",
+                            "".to_string(),
+                            Applicability::MachineApplicable,
+                        );
+
+                        return None;
+                    }
                     // Also catches `fn foo(&a)`.
                     PatKind::Ref(ref inner_pat, mutab)
                         if let PatKind::Ident(_, ident, _) = inner_pat.clone().kind =>
@@ -2305,7 +2357,7 @@ impl<'a> Parser<'a> {
                                 "_: ".to_string(),
                                 Applicability::MachineApplicable,
                             );
-                            err.note(rfc_note);
+                            maybe_emit_anon_params_note(self, err);
                         }
 
                         return None;
@@ -2313,7 +2365,13 @@ impl<'a> Parser<'a> {
                 };
 
             // `fn foo(a, b) {}`, `fn foo(a<x>, b<y>) {}` or `fn foo(usize, usize) {}`
-            if first_param {
+            if first_param
+                // Only when the fn is a method, we emit this suggestion.
+                && matches!(
+                    fn_parse_mode.context,
+                    FnContext::Trait | FnContext::Impl
+                )
+            {
                 err.span_suggestion_verbose(
                     self_span,
                     "if this is a `self` type, give it a parameter name",
@@ -2337,7 +2395,7 @@ impl<'a> Parser<'a> {
                 type_sugg,
                 Applicability::MachineApplicable,
             );
-            err.note(rfc_note);
+            maybe_emit_anon_params_note(self, err);
 
             // Don't attempt to recover by using the `X` in `X<Y>` as the parameter name.
             return if self.token == token::Lt { None } else { Some(ident) };
@@ -2345,6 +2403,7 @@ impl<'a> Parser<'a> {
         None
     }
 
+    #[cold]
     pub(super) fn recover_arg_parse(&mut self) -> PResult<'a, (Box<ast::Pat>, Box<ast::Ty>)> {
         let pat = self.parse_pat_no_top_alt(Some(Expected::ArgumentName), None)?;
         self.expect(exp!(Colon))?;
@@ -2371,8 +2430,8 @@ impl<'a> Parser<'a> {
 
     pub(super) fn consume_block(
         &mut self,
-        open: ExpTokenPair<'_>,
-        close: ExpTokenPair<'_>,
+        open: ExpTokenPair,
+        close: ExpTokenPair,
         consume_close: ConsumeClosingDelim,
     ) {
         let mut brace_depth = 0;
@@ -2725,36 +2784,16 @@ impl<'a> Parser<'a> {
 
     /// Some special error handling for the "top-level" patterns in a match arm,
     /// `for` loop, `let`, &c. (in contrast to subpatterns within such).
-    pub(crate) fn maybe_recover_colon_colon_in_pat_typo(
+    #[cold]
+    pub(crate) fn recover_colon_colon_in_pat_typo(
         &mut self,
-        mut first_pat: Box<Pat>,
+        mut first_pat: Pat,
         expected: Option<Expected>,
-    ) -> Box<Pat> {
+    ) -> Pat {
         if token::Colon != self.token.kind {
             return first_pat;
         }
-        if !matches!(first_pat.kind, PatKind::Ident(_, _, None) | PatKind::Path(..))
-            || !self.look_ahead(1, |token| token.is_non_reserved_ident())
-        {
-            let mut snapshot_type = self.create_snapshot_for_diagnostic();
-            snapshot_type.bump(); // `:`
-            match snapshot_type.parse_ty() {
-                Err(inner_err) => {
-                    inner_err.cancel();
-                }
-                Ok(ty) => {
-                    let Err(mut err) = self.expected_one_of_not_found(&[], &[]) else {
-                        return first_pat;
-                    };
-                    err.span_label(ty.span, "specifying the type of a pattern isn't supported");
-                    self.restore_snapshot(snapshot_type);
-                    let span = first_pat.span.to(ty.span);
-                    first_pat = self.mk_pat(span, PatKind::Wild);
-                    err.emit();
-                }
-            }
-            return first_pat;
-        }
+
         // The pattern looks like it might be a path with a `::` -> `:` typo:
         // `match foo { bar:baz => {} }`
         let colon_span = self.token.span;
@@ -2842,7 +2881,13 @@ impl<'a> Parser<'a> {
                                 Applicability::MaybeIncorrect,
                             );
                         } else {
-                            first_pat = self.mk_pat(new_span, PatKind::Wild);
+                            first_pat = self.mk_pat(
+                                new_span,
+                                PatKind::Err(
+                                    self.dcx()
+                                        .span_delayed_bug(colon_span, "recovered bad path pattern"),
+                                ),
+                            );
                         }
                         self.restore_snapshot(snapshot_pat);
                     }
@@ -2855,7 +2900,14 @@ impl<'a> Parser<'a> {
                         err.span_label(ty.span, "specifying the type of a pattern isn't supported");
                         self.restore_snapshot(snapshot_type);
                         let new_span = first_pat.span.to(ty.span);
-                        first_pat = self.mk_pat(new_span, PatKind::Wild);
+                        first_pat =
+                            self.mk_pat(
+                                new_span,
+                                PatKind::Err(self.dcx().span_delayed_bug(
+                                    colon_span,
+                                    "recovered bad pattern with type",
+                                )),
+                            );
                     }
                 }
                 err.emit();
@@ -2918,7 +2970,11 @@ impl<'a> Parser<'a> {
         if self.token != token::Comma {
             return Ok(());
         }
+        self.recover_unexpected_comma(lo, rt)
+    }
 
+    #[cold]
+    fn recover_unexpected_comma(&mut self, lo: Span, rt: CommaRecoveryMode) -> PResult<'a, ()> {
         // An unexpected comma after a top-level pattern is a clue that the
         // user (perhaps more accustomed to some other language) forgot the
         // parentheses in what should have been a tuple pattern; return a
@@ -2932,26 +2988,24 @@ impl<'a> Parser<'a> {
         }
         let seq_span = lo.to(self.prev_token.span);
         let mut err = self.dcx().struct_span_err(comma_span, "unexpected `,` in pattern");
-        if let Ok(seq_snippet) = self.span_to_snippet(seq_span) {
-            err.multipart_suggestion(
-                format!(
-                    "try adding parentheses to match on a tuple{}",
-                    if let CommaRecoveryMode::LikelyTuple = rt { "" } else { "..." },
-                ),
-                vec![
-                    (seq_span.shrink_to_lo(), "(".to_string()),
-                    (seq_span.shrink_to_hi(), ")".to_string()),
-                ],
+        err.multipart_suggestion(
+            format!(
+                "try adding parentheses to match on a tuple{}",
+                if let CommaRecoveryMode::LikelyTuple = rt { "" } else { "..." },
+            ),
+            vec![
+                (seq_span.shrink_to_lo(), "(".to_string()),
+                (seq_span.shrink_to_hi(), ")".to_string()),
+            ],
+            Applicability::MachineApplicable,
+        );
+        if let CommaRecoveryMode::EitherTupleOrPipe = rt {
+            err.span_suggestion(
+                comma_span,
+                "...or a vertical bar to match on alternatives",
+                " |",
                 Applicability::MachineApplicable,
             );
-            if let CommaRecoveryMode::EitherTupleOrPipe = rt {
-                err.span_suggestion(
-                    seq_span,
-                    "...or a vertical bar to match on multiple alternatives",
-                    seq_snippet.replace(',', " |"),
-                    Applicability::MachineApplicable,
-                );
-            }
         }
         Err(err)
     }

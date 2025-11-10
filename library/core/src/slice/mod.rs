@@ -328,7 +328,7 @@ impl<T> [T] {
         } else {
             // SAFETY: We explicitly check for the correct number of elements,
             //   and do not let the reference outlive the slice.
-            Some(unsafe { &*(self.as_ptr().cast::<[T; N]>()) })
+            Some(unsafe { &*(self.as_ptr().cast_array()) })
         }
     }
 
@@ -359,7 +359,7 @@ impl<T> [T] {
             // SAFETY: We explicitly check for the correct number of elements,
             //   do not let the reference outlive the slice,
             //   and require exclusive access to the entire slice to mutate the chunk.
-            Some(unsafe { &mut *(self.as_mut_ptr().cast::<[T; N]>()) })
+            Some(unsafe { &mut *(self.as_mut_ptr().cast_array()) })
         }
     }
 
@@ -387,7 +387,7 @@ impl<T> [T] {
 
         // SAFETY: We explicitly check for the correct number of elements,
         //   and do not let the references outlive the slice.
-        Some((unsafe { &*(first.as_ptr().cast::<[T; N]>()) }, tail))
+        Some((unsafe { &*(first.as_ptr().cast_array()) }, tail))
     }
 
     /// Returns a mutable array reference to the first `N` items in the slice and the remaining
@@ -420,7 +420,7 @@ impl<T> [T] {
         // SAFETY: We explicitly check for the correct number of elements,
         //   do not let the reference outlive the slice,
         //   and enforce exclusive mutability of the chunk by the split.
-        Some((unsafe { &mut *(first.as_mut_ptr().cast::<[T; N]>()) }, tail))
+        Some((unsafe { &mut *(first.as_mut_ptr().cast_array()) }, tail))
     }
 
     /// Returns an array reference to the last `N` items in the slice and the remaining slice.
@@ -448,7 +448,7 @@ impl<T> [T] {
 
         // SAFETY: We explicitly check for the correct number of elements,
         //   and do not let the references outlive the slice.
-        Some((init, unsafe { &*(last.as_ptr().cast::<[T; N]>()) }))
+        Some((init, unsafe { &*(last.as_ptr().cast_array()) }))
     }
 
     /// Returns a mutable array reference to the last `N` items in the slice and the remaining
@@ -482,7 +482,7 @@ impl<T> [T] {
         // SAFETY: We explicitly check for the correct number of elements,
         //   do not let the reference outlive the slice,
         //   and enforce exclusive mutability of the chunk by the split.
-        Some((init, unsafe { &mut *(last.as_mut_ptr().cast::<[T; N]>()) }))
+        Some((init, unsafe { &mut *(last.as_mut_ptr().cast_array()) }))
     }
 
     /// Returns an array reference to the last `N` items in the slice.
@@ -511,7 +511,7 @@ impl<T> [T] {
 
         // SAFETY: We explicitly check for the correct number of elements,
         //   and do not let the references outlive the slice.
-        Some(unsafe { &*(last.as_ptr().cast::<[T; N]>()) })
+        Some(unsafe { &*(last.as_ptr().cast_array()) })
     }
 
     /// Returns a mutable array reference to the last `N` items in the slice.
@@ -542,7 +542,7 @@ impl<T> [T] {
         // SAFETY: We explicitly check for the correct number of elements,
         //   do not let the reference outlive the slice,
         //   and require exclusive access to the entire slice to mutate the chunk.
-        Some(unsafe { &mut *(last.as_mut_ptr().cast::<[T; N]>()) })
+        Some(unsafe { &mut *(last.as_mut_ptr().cast_array()) })
     }
 
     /// Returns a reference to an element or subslice depending on the type of
@@ -841,12 +841,13 @@ impl<T> [T] {
     /// Gets a reference to the underlying array.
     ///
     /// If `N` is not exactly equal to the length of `self`, then this method returns `None`.
-    #[unstable(feature = "slice_as_array", issue = "133508")]
+    #[stable(feature = "core_slice_as_array", since = "CURRENT_RUSTC_VERSION")]
+    #[rustc_const_stable(feature = "core_slice_as_array", since = "CURRENT_RUSTC_VERSION")]
     #[inline]
     #[must_use]
     pub const fn as_array<const N: usize>(&self) -> Option<&[T; N]> {
         if self.len() == N {
-            let ptr = self.as_ptr() as *const [T; N];
+            let ptr = self.as_ptr().cast_array();
 
             // SAFETY: The underlying array of a slice can be reinterpreted as an actual array `[T; N]` if `N` is not greater than the slice's length.
             let me = unsafe { &*ptr };
@@ -859,12 +860,13 @@ impl<T> [T] {
     /// Gets a mutable reference to the slice's underlying array.
     ///
     /// If `N` is not exactly equal to the length of `self`, then this method returns `None`.
-    #[unstable(feature = "slice_as_array", issue = "133508")]
+    #[stable(feature = "core_slice_as_array", since = "CURRENT_RUSTC_VERSION")]
+    #[rustc_const_stable(feature = "core_slice_as_array", since = "CURRENT_RUSTC_VERSION")]
     #[inline]
     #[must_use]
     pub const fn as_mut_array<const N: usize>(&mut self) -> Option<&mut [T; N]> {
         if self.len() == N {
-            let ptr = self.as_mut_ptr() as *mut [T; N];
+            let ptr = self.as_mut_ptr().cast_array();
 
             // SAFETY: The underlying array of a slice can be reinterpreted as an actual array `[T; N]` if `N` is not greater than the slice's length.
             let me = unsafe { &mut *ptr };
@@ -2725,6 +2727,38 @@ impl<T> [T] {
         None
     }
 
+    /// Returns a subslice with the prefix and suffix removed.
+    ///
+    /// If the slice starts with `prefix` and ends with `suffix`, returns the subslice after the
+    /// prefix and before the suffix, wrapped in `Some`.
+    ///
+    /// If the slice does not start with `prefix` or does not end with `suffix`, returns `None`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(strip_circumfix)]
+    ///
+    /// let v = &[10, 50, 40, 30];
+    /// assert_eq!(v.strip_circumfix(&[10], &[30]), Some(&[50, 40][..]));
+    /// assert_eq!(v.strip_circumfix(&[10], &[40, 30]), Some(&[50][..]));
+    /// assert_eq!(v.strip_circumfix(&[10, 50], &[40, 30]), Some(&[][..]));
+    /// assert_eq!(v.strip_circumfix(&[50], &[30]), None);
+    /// assert_eq!(v.strip_circumfix(&[10], &[40]), None);
+    /// assert_eq!(v.strip_circumfix(&[], &[40, 30]), Some(&[10, 50][..]));
+    /// assert_eq!(v.strip_circumfix(&[10, 50], &[]), Some(&[40, 30][..]));
+    /// ```
+    #[must_use = "returns the subslice without modifying the original"]
+    #[unstable(feature = "strip_circumfix", issue = "147946")]
+    pub fn strip_circumfix<S, P>(&self, prefix: &P, suffix: &S) -> Option<&[T]>
+    where
+        T: PartialEq,
+        S: SlicePattern<Item = T> + ?Sized,
+        P: SlicePattern<Item = T> + ?Sized,
+    {
+        self.strip_prefix(prefix)?.strip_suffix(suffix)
+    }
+
     /// Returns a subslice with the optional prefix removed.
     ///
     /// If the slice starts with `prefix`, returns the subslice after the prefix.  If `prefix`
@@ -3629,7 +3663,7 @@ impl<T> [T] {
     /// assert_eq!(a, ['a', 'c', 'd', 'e', 'b', 'f']);
     /// ```
     #[stable(feature = "slice_rotate", since = "1.26.0")]
-    #[rustc_const_unstable(feature = "const_slice_rotate", issue = "143812")]
+    #[rustc_const_stable(feature = "const_slice_rotate", since = "1.92.0")]
     pub const fn rotate_left(&mut self, mid: usize) {
         assert!(mid <= self.len());
         let k = self.len() - mid;
@@ -3675,7 +3709,7 @@ impl<T> [T] {
     /// assert_eq!(a, ['a', 'e', 'b', 'c', 'd', 'f']);
     /// ```
     #[stable(feature = "slice_rotate", since = "1.26.0")]
-    #[rustc_const_unstable(feature = "const_slice_rotate", issue = "143812")]
+    #[rustc_const_stable(feature = "const_slice_rotate", since = "1.92.0")]
     pub const fn rotate_right(&mut self, k: usize) {
         assert!(k <= self.len());
         let mid = self.len() - k;
@@ -3858,8 +3892,8 @@ impl<T> [T] {
     {
         // The panic code path was put into a cold function to not bloat the
         // call site.
-        #[cfg_attr(not(feature = "panic_immediate_abort"), inline(never), cold)]
-        #[cfg_attr(feature = "panic_immediate_abort", inline)]
+        #[cfg_attr(not(panic = "immediate-abort"), inline(never), cold)]
+        #[cfg_attr(panic = "immediate-abort", inline)]
         #[track_caller]
         const fn len_mismatch_fail(dst_len: usize, src_len: usize) -> ! {
             const_panic!(

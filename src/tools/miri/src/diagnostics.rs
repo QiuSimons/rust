@@ -1,9 +1,11 @@
 use std::fmt::{self, Write};
 use std::num::NonZero;
+use std::sync::Mutex;
 
 use rustc_abi::{Align, Size};
 use rustc_errors::{Diag, DiagMessage, Level};
-use rustc_span::{DUMMY_SP, SpanData, Symbol};
+use rustc_hash::FxHashSet;
+use rustc_span::{DUMMY_SP, Span, SpanData, Symbol};
 
 use crate::borrow_tracker::stacked_borrows::diagnostics::TagHistory;
 use crate::borrow_tracker::tree_borrows::diagnostics as tree_diagnostics;
@@ -31,8 +33,9 @@ pub enum TerminationInfo {
     },
     Int2PtrWithStrictProvenance,
     Deadlock,
-    /// In GenMC mode, an execution can get stuck in certain cases. This is not an error.
-    GenmcStuckExecution,
+    /// In GenMC mode, executions can get blocked, which stops the current execution without running any cleanup.
+    /// No leak checks should be performed if this happens, since they would give false positives.
+    GenmcBlockedExecution,
     MultipleSymbolDefinitions {
         link_name: Symbol,
         first: SpanData,
@@ -77,7 +80,8 @@ impl fmt::Display for TerminationInfo {
             StackedBorrowsUb { msg, .. } => write!(f, "{msg}"),
             TreeBorrowsUb { title, .. } => write!(f, "{title}"),
             Deadlock => write!(f, "the evaluated program deadlocked"),
-            GenmcStuckExecution => write!(f, "GenMC determined that the execution got stuck"),
+            GenmcBlockedExecution =>
+                write!(f, "GenMC determined that the execution got blocked (this is not an error)"),
             MultipleSymbolDefinitions { link_name, .. } =>
                 write!(f, "multiple definitions of symbol `{link_name}`"),
             SymbolShimClashing { link_name, .. } =>
@@ -122,9 +126,9 @@ pub enum NonHaltingDiagnostic {
     CreatedPointerTag(NonZero<u64>, Option<String>, Option<(AllocId, AllocRange, ProvenanceExtra)>),
     /// This `Item` was popped from the borrow stack. The string explains the reason.
     PoppedPointerTag(Item, String),
-    CreatedAlloc(AllocId, Size, Align, MemoryKind),
+    TrackingAlloc(AllocId, Size, Align),
     FreedAlloc(AllocId),
-    AccessedAlloc(AllocId, AccessKind),
+    AccessedAlloc(AllocId, AllocRange, borrow_tracker::AccessKind),
     RejectedIsolatedOp(String),
     ProgressReport {
         block_count: u64, // how many basic blocks have been run so far
@@ -135,10 +139,18 @@ pub enum NonHaltingDiagnostic {
     NativeCallSharedMem {
         tracing: bool,
     },
+    NativeCallFnPtr,
     WeakMemoryOutdatedLoad {
         ptr: Pointer,
     },
     ExternTypeReborrow,
+    GenmcCompareExchangeWeak,
+    GenmcCompareExchangeOrderingMismatch {
+        success_ordering: AtomicRwOrd,
+        upgraded_success_ordering: AtomicRwOrd,
+        failure_ordering: AtomicReadOrd,
+        effective_failure_ordering: AtomicReadOrd,
+    },
 }
 
 /// Level of Miri specific diagnostics
@@ -175,16 +187,14 @@ pub fn prune_stacktrace<'tcx>(
         }
         BacktraceStyle::Short => {
             let original_len = stacktrace.len();
-            // Only prune frames if there is at least one local frame. This check ensures that if
-            // we get a backtrace that never makes it to the user code because it has detected a
-            // bug in the Rust runtime, we don't prune away every frame.
-            let has_local_frame = stacktrace.iter().any(|frame| machine.is_local(frame));
+            // Remove all frames marked with `caller_location` -- that attribute indicates we
+            // usually want to point at the caller, not them.
+            stacktrace.retain(|frame| !frame.instance.def.requires_caller_location(machine.tcx));
+            // Only prune further frames if there is at least one local frame. This check ensures
+            // that if we get a backtrace that never makes it to the user code because it has
+            // detected a bug in the Rust runtime, we don't prune away every frame.
+            let has_local_frame = stacktrace.iter().any(|frame| machine.is_local(frame.instance));
             if has_local_frame {
-                // Remove all frames marked with `caller_location` -- that attribute indicates we
-                // usually want to point at the caller, not them.
-                stacktrace
-                    .retain(|frame| !frame.instance.def.requires_caller_location(machine.tcx));
-
                 // This is part of the logic that `std` uses to select the relevant part of a
                 // backtrace. But here, we only look for __rust_begin_short_backtrace, not
                 // __rust_end_short_backtrace because the end symbol comes from a call to the default
@@ -204,7 +214,7 @@ pub fn prune_stacktrace<'tcx>(
                 // This len check ensures that we don't somehow remove every frame, as doing so breaks
                 // the primary error message.
                 while stacktrace.len() > 1
-                    && stacktrace.last().is_some_and(|frame| !machine.is_local(frame))
+                    && stacktrace.last().is_some_and(|frame| !machine.is_local(frame.instance))
                 {
                     stacktrace.pop();
                 }
@@ -243,11 +253,12 @@ pub fn report_error<'tcx>(
                 labels.push(format!("this thread got stuck here"));
                 None
             }
-            GenmcStuckExecution => {
-                // This case should only happen in GenMC mode. We treat it like a normal program exit.
+            GenmcBlockedExecution => {
+                // This case should only happen in GenMC mode.
                 assert!(ecx.machine.data_race.as_genmc_ref().is_some());
-                tracing::info!("GenMC: found stuck execution");
-                return Some((0, true));
+                // The program got blocked by GenMC without finishing the execution.
+                // No cleanup code was executed, so we don't do any leak checks.
+                return Some((0, false));
             }
             MultipleSymbolDefinitions { .. } | SymbolShimClashing { .. } => None,
         };
@@ -282,7 +293,8 @@ pub fn report_error<'tcx>(
             },
             TreeBorrowsUb { title: _, details, history } => {
                 let mut helps = vec![
-                    note!("this indicates a potential bug in the program: it performed an invalid operation, but the Tree Borrows rules it violated are still experimental")
+                    note!("this indicates a potential bug in the program: it performed an invalid operation, but the Tree Borrows rules it violated are still experimental"),
+                    note!("see https://github.com/rust-lang/unsafe-code-guidelines/blob/master/wip/tree-borrows.md for further information"),
                 ];
                 for m in details {
                     helps.push(note!("{m}"));
@@ -590,28 +602,30 @@ pub fn report_msg<'tcx>(
     }
 
     // Add backtrace
-    let mut backtrace_title = String::from("BACKTRACE");
-    if extra_span {
-        write!(backtrace_title, " (of the first span)").unwrap();
-    }
-    if let Some(thread) = thread {
-        let thread_name = machine.threads.get_thread_display_name(thread);
-        if thread_name != "main" {
-            // Only print thread name if it is not `main`.
-            write!(backtrace_title, " on thread `{thread_name}`").unwrap();
-        };
-    }
-    write!(backtrace_title, ":").unwrap();
-    err.note(backtrace_title);
-    for (idx, frame_info) in stacktrace.iter().enumerate() {
-        let is_local = machine.is_local(frame_info);
-        // No span for non-local frames and the first frame (which is the error site).
-        if is_local && idx > 0 {
-            err.subdiagnostic(frame_info.as_note(machine.tcx));
-        } else {
-            let sm = sess.source_map();
-            let span = sm.span_to_embeddable_string(frame_info.span);
-            err.note(format!("{frame_info} at {span}"));
+    if stacktrace.len() > 1 {
+        let mut backtrace_title = String::from("BACKTRACE");
+        if extra_span {
+            write!(backtrace_title, " (of the first span)").unwrap();
+        }
+        if let Some(thread) = thread {
+            let thread_name = machine.threads.get_thread_display_name(thread);
+            if thread_name != "main" {
+                // Only print thread name if it is not `main`.
+                write!(backtrace_title, " on thread `{thread_name}`").unwrap();
+            };
+        }
+        write!(backtrace_title, ":").unwrap();
+        err.note(backtrace_title);
+        for (idx, frame_info) in stacktrace.iter().enumerate() {
+            let is_local = machine.is_local(frame_info.instance);
+            // No span for non-local frames and the first frame (which is the error site).
+            if is_local && idx > 0 {
+                err.subdiagnostic(frame_info.as_note(machine.tcx));
+            } else {
+                let sm = sess.source_map();
+                let span = sm.span_to_embeddable_string(frame_info.span);
+                err.note(format!("{frame_info} at {span}"));
+            }
         }
     }
 
@@ -631,11 +645,18 @@ impl<'tcx> MiriMachine<'tcx> {
             Int2Ptr { .. } => ("integer-to-pointer cast".to_string(), DiagLevel::Warning),
             NativeCallSharedMem { .. } =>
                 ("sharing memory with a native function".to_string(), DiagLevel::Warning),
+            NativeCallFnPtr =>
+                (
+                    "sharing a function pointer with a native function".to_string(),
+                    DiagLevel::Warning,
+                ),
             ExternTypeReborrow =>
                 ("reborrow of reference to `extern type`".to_string(), DiagLevel::Warning),
+            GenmcCompareExchangeWeak | GenmcCompareExchangeOrderingMismatch { .. } =>
+                ("GenMC might miss possible behaviors of this code".to_string(), DiagLevel::Warning),
             CreatedPointerTag(..)
             | PoppedPointerTag(..)
-            | CreatedAlloc(..)
+            | TrackingAlloc(..)
             | AccessedAlloc(..)
             | FreedAlloc(..)
             | ProgressReport { .. }
@@ -652,25 +673,44 @@ impl<'tcx> MiriMachine<'tcx> {
                     "created tag {tag:?} with {perm} at {alloc_id:?}{range:?} derived from {orig_tag:?}"
                 ),
             PoppedPointerTag(item, cause) => format!("popped tracked tag for item {item:?}{cause}"),
-            CreatedAlloc(AllocId(id), size, align, kind) =>
+            TrackingAlloc(id, size, align) =>
                 format!(
-                    "created {kind} allocation of {size} bytes (alignment {align} bytes) with id {id}",
+                    "now tracking allocation {id:?} of {size} bytes (alignment {align} bytes)",
                     size = size.bytes(),
                     align = align.bytes(),
                 ),
-            AccessedAlloc(AllocId(id), access_kind) =>
-                format!("{access_kind} to allocation with id {id}"),
-            FreedAlloc(AllocId(id)) => format!("freed allocation with id {id}"),
+            AccessedAlloc(id, range, access_kind) =>
+                format!("{access_kind} at {id:?}[{}..{}]", range.start.bytes(), range.end().bytes()),
+            FreedAlloc(id) => format!("freed allocation {id:?}"),
             RejectedIsolatedOp(op) => format!("{op} was made to return an error due to isolation"),
             ProgressReport { .. } =>
                 format!("progress report: current operation being executed is here"),
             Int2Ptr { .. } => format!("integer-to-pointer cast"),
             NativeCallSharedMem { .. } =>
                 format!("sharing memory with a native function called via FFI"),
+            NativeCallFnPtr =>
+                format!("sharing a function pointer with a native function called via FFI"),
             WeakMemoryOutdatedLoad { ptr } =>
                 format!("weak memory emulation: outdated value returned from load at {ptr}"),
             ExternTypeReborrow =>
                 format!("reborrow of a reference to `extern type` is not properly supported"),
+            GenmcCompareExchangeWeak =>
+                "GenMC currently does not model spurious failures of `compare_exchange_weak`. Miri with GenMC might miss bugs related to spurious failures."
+                    .to_string(),
+            GenmcCompareExchangeOrderingMismatch {
+                success_ordering,
+                upgraded_success_ordering,
+                failure_ordering,
+                effective_failure_ordering,
+            } => {
+                let was_upgraded_msg = if success_ordering != upgraded_success_ordering {
+                    format!("Success ordering '{success_ordering:?}' was upgraded to '{upgraded_success_ordering:?}' to match failure ordering '{failure_ordering:?}'")
+                } else {
+                    assert_ne!(failure_ordering, effective_failure_ordering);
+                    format!("Due to success ordering '{success_ordering:?}', the failure ordering '{failure_ordering:?}' is treated like '{effective_failure_ordering:?}'")
+                };
+                format!("GenMC currently does not model the failure ordering for `compare_exchange`. {was_upgraded_msg}. Miri with GenMC might miss bugs related to this memory access.")
+            }
         };
 
         let notes = match &e {
@@ -747,6 +787,11 @@ impl<'tcx> MiriMachine<'tcx> {
                         ),
                     ]
                 },
+            NativeCallFnPtr => {
+                vec![note!(
+                    "calling Rust functions from C is not supported and will, in the best case, crash the program"
+                )]
+            }
             ExternTypeReborrow => {
                 assert!(self.borrow_tracker.as_ref().is_some_and(|b| {
                     matches!(
@@ -804,5 +849,46 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
             Some(this.active_thread()),
             &this.machine,
         );
+    }
+
+    /// Call `f` only if this is the first time we are seeing this span.
+    /// The `first` parameter indicates whether this is the first time *ever* that this diagnostic
+    /// is emitted.
+    fn dedup_diagnostic(
+        &self,
+        dedup: &SpanDedupDiagnostic,
+        f: impl FnOnce(/*first*/ bool) -> NonHaltingDiagnostic,
+    ) {
+        let this = self.eval_context_ref();
+        // We want to deduplicate both based on where the error seems to be located "from the user
+        // perspective", and the location of the actual operation (to avoid warning about the same
+        // operation called from different places in the local code).
+        let span1 = this.machine.current_user_relevant_span();
+        // For the "location of the operation", we still skip `track_caller` frames, to match the
+        // span that the diagnostic will point at.
+        let span2 = this
+            .active_thread_stack()
+            .iter()
+            .rev()
+            .find(|frame| !frame.instance().def.requires_caller_location(*this.tcx))
+            .map(|frame| frame.current_span())
+            .unwrap_or(span1);
+
+        let mut lock = dedup.0.lock().unwrap();
+        let first = lock.is_empty();
+        // Avoid mutating the hashset unless both spans are new.
+        if !lock.contains(&span2) && lock.insert(span1) && (span1 == span2 || lock.insert(span2)) {
+            // Both of the two spans were newly inserted.
+            this.emit_diagnostic(f(first));
+        }
+    }
+}
+
+/// Helps deduplicate a diagnostic to ensure it is only shown once per span.
+pub struct SpanDedupDiagnostic(Mutex<FxHashSet<Span>>);
+
+impl SpanDedupDiagnostic {
+    pub const fn new() -> Self {
+        Self(Mutex::new(FxHashSet::with_hasher(rustc_hash::FxBuildHasher)))
     }
 }

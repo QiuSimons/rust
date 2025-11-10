@@ -1,7 +1,9 @@
 use std::collections::hash_map::Entry::*;
 
 use rustc_abi::{CanonAbi, X86Call};
-use rustc_ast::expand::allocator::{ALLOCATOR_METHODS, NO_ALLOC_SHIM_IS_UNSTABLE, global_fn_name};
+use rustc_ast::expand::allocator::{
+    ALLOC_ERROR_HANDLER, ALLOCATOR_METHODS, NO_ALLOC_SHIM_IS_UNSTABLE, global_fn_name,
+};
 use rustc_data_structures::unord::UnordMap;
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{CrateNum, DefId, DefIdMap, LOCAL_CRATE, LocalDefId};
@@ -15,10 +17,10 @@ use rustc_middle::ty::{self, GenericArgKind, GenericArgsRef, Instance, SymbolNam
 use rustc_middle::util::Providers;
 use rustc_session::config::{CrateType, OomStrategy};
 use rustc_symbol_mangling::mangle_internal_symbol;
-use rustc_target::spec::{SanitizerSet, TlsModel};
+use rustc_target::spec::{Arch, TlsModel};
 use tracing::debug;
 
-use crate::base::allocator_kind_for_codegen;
+use crate::back::symbol_export;
 
 fn threshold(tcx: TyCtxt<'_>) -> SymbolExportLevel {
     crates_export_threshold(tcx.crate_types())
@@ -49,15 +51,7 @@ fn reachable_non_generics_provider(tcx: TyCtxt<'_>, _: LocalCrate) -> DefIdMap<S
         return Default::default();
     }
 
-    // Check to see if this crate is a "special runtime crate". These
-    // crates, implementation details of the standard library, typically
-    // have a bunch of `pub extern` and `#[no_mangle]` functions as the
-    // ABI between them. We don't want their symbols to have a `C`
-    // export level, however, as they're just implementation details.
-    // Down below we'll hardwire all of the symbols to the `Rust` export
-    // level instead.
-    let special_runtime_crate =
-        tcx.is_panic_runtime(LOCAL_CRATE) || tcx.is_compiler_builtins(LOCAL_CRATE);
+    let is_compiler_builtins = tcx.is_compiler_builtins(LOCAL_CRATE);
 
     let mut reachable_non_generics: DefIdMap<_> = tcx
         .reachable_set(())
@@ -102,11 +96,12 @@ fn reachable_non_generics_provider(tcx: TyCtxt<'_>, _: LocalCrate) -> DefIdMap<S
             if tcx.cross_crate_inlinable(def_id) { None } else { Some(def_id) }
         })
         .map(|def_id| {
-            // We won't link right if this symbol is stripped during LTO.
-            let name = tcx.symbol_name(Instance::mono(tcx, def_id.to_def_id())).name;
-            let used = name == "rust_eh_personality";
-
-            let export_level = if special_runtime_crate {
+            let export_level = if is_compiler_builtins {
+                // We don't want to export compiler-builtins symbols from any
+                // dylibs, even rust dylibs. Unlike all other crates it gets
+                // duplicated in every linker invocation and it may otherwise
+                // unintentionally override definitions of these symbols by
+                // libgcc or compiler-rt for C code.
                 SymbolExportLevel::Rust
             } else {
                 symbol_export_level(tcx, def_id.to_def_id())
@@ -129,8 +124,7 @@ fn reachable_non_generics_provider(tcx: TyCtxt<'_>, _: LocalCrate) -> DefIdMap<S
                     SymbolExportKind::Text
                 },
                 used: codegen_attrs.flags.contains(CodegenFnAttrFlags::USED_COMPILER)
-                    || codegen_attrs.flags.contains(CodegenFnAttrFlags::USED_LINKER)
-                    || used,
+                    || codegen_attrs.flags.contains(CodegenFnAttrFlags::USED_LINKER),
                 rustc_std_internal_symbol: codegen_attrs
                     .flags
                     .contains(CodegenFnAttrFlags::RUSTC_STD_INTERNAL_SYMBOL),
@@ -217,78 +211,6 @@ fn exported_non_generic_symbols_provider_local<'tcx>(
         ));
     }
 
-    // Mark allocator shim symbols as exported only if they were generated.
-    if allocator_kind_for_codegen(tcx).is_some() {
-        for symbol_name in ALLOCATOR_METHODS
-            .iter()
-            .map(|method| mangle_internal_symbol(tcx, global_fn_name(method.name).as_str()))
-            .chain([
-                mangle_internal_symbol(tcx, "__rust_alloc_error_handler"),
-                mangle_internal_symbol(tcx, OomStrategy::SYMBOL),
-                mangle_internal_symbol(tcx, NO_ALLOC_SHIM_IS_UNSTABLE),
-            ])
-        {
-            let exported_symbol = ExportedSymbol::NoDefId(SymbolName::new(tcx, &symbol_name));
-
-            symbols.push((
-                exported_symbol,
-                SymbolExportInfo {
-                    level: SymbolExportLevel::Rust,
-                    kind: SymbolExportKind::Text,
-                    used: false,
-                    rustc_std_internal_symbol: true,
-                },
-            ));
-        }
-    }
-
-    if tcx.sess.instrument_coverage() || tcx.sess.opts.cg.profile_generate.enabled() {
-        // These are weak symbols that point to the profile version and the
-        // profile name, which need to be treated as exported so LTO doesn't nix
-        // them.
-        const PROFILER_WEAK_SYMBOLS: [&str; 2] =
-            ["__llvm_profile_raw_version", "__llvm_profile_filename"];
-
-        symbols.extend(PROFILER_WEAK_SYMBOLS.iter().map(|sym| {
-            let exported_symbol = ExportedSymbol::NoDefId(SymbolName::new(tcx, sym));
-            (
-                exported_symbol,
-                SymbolExportInfo {
-                    level: SymbolExportLevel::C,
-                    kind: SymbolExportKind::Data,
-                    used: false,
-                    rustc_std_internal_symbol: false,
-                },
-            )
-        }));
-    }
-
-    if tcx.sess.opts.unstable_opts.sanitizer.contains(SanitizerSet::MEMORY) {
-        let mut msan_weak_symbols = Vec::new();
-
-        // Similar to profiling, preserve weak msan symbol during LTO.
-        if tcx.sess.opts.unstable_opts.sanitizer_recover.contains(SanitizerSet::MEMORY) {
-            msan_weak_symbols.push("__msan_keep_going");
-        }
-
-        if tcx.sess.opts.unstable_opts.sanitizer_memory_track_origins != 0 {
-            msan_weak_symbols.push("__msan_track_origins");
-        }
-
-        symbols.extend(msan_weak_symbols.into_iter().map(|sym| {
-            let exported_symbol = ExportedSymbol::NoDefId(SymbolName::new(tcx, sym));
-            (
-                exported_symbol,
-                SymbolExportInfo {
-                    level: SymbolExportLevel::C,
-                    kind: SymbolExportKind::Data,
-                    used: false,
-                    rustc_std_internal_symbol: false,
-                },
-            )
-        }));
-    }
-
     // Sort so we get a stable incr. comp. hash.
     symbols.sort_by_cached_key(|s| s.0.symbol_name_for_local_instance(tcx));
 
@@ -306,7 +228,8 @@ fn exported_generic_symbols_provider_local<'tcx>(
     let mut symbols: Vec<_> = vec![];
 
     if tcx.local_crate_exports_generics() {
-        use rustc_middle::mir::mono::{Linkage, MonoItem, Visibility};
+        use rustc_hir::attrs::Linkage;
+        use rustc_middle::mir::mono::{MonoItem, Visibility};
         use rustc_middle::ty::InstanceKind;
 
         // Normally, we require that shared monomorphizations are not hidden,
@@ -562,6 +485,31 @@ pub(crate) fn provide(providers: &mut Providers) {
         upstream_monomorphizations_for_provider;
 }
 
+pub(crate) fn allocator_shim_symbols(
+    tcx: TyCtxt<'_>,
+) -> impl Iterator<Item = (String, SymbolExportKind)> {
+    ALLOCATOR_METHODS
+        .iter()
+        .map(move |method| mangle_internal_symbol(tcx, global_fn_name(method.name).as_str()))
+        .chain([
+            mangle_internal_symbol(tcx, global_fn_name(ALLOC_ERROR_HANDLER).as_str()),
+            mangle_internal_symbol(tcx, OomStrategy::SYMBOL),
+            mangle_internal_symbol(tcx, NO_ALLOC_SHIM_IS_UNSTABLE),
+        ])
+        .map(move |symbol_name| {
+            let exported_symbol = ExportedSymbol::NoDefId(SymbolName::new(tcx, &symbol_name));
+
+            (
+                symbol_export::exporting_symbol_name_for_instance_in_crate(
+                    tcx,
+                    exported_symbol,
+                    LOCAL_CRATE,
+                ),
+                SymbolExportKind::Text,
+            )
+        })
+}
+
 fn symbol_export_level(tcx: TyCtxt<'_>, sym_def_id: DefId) -> SymbolExportLevel {
     // We export anything that's not mangled at the "C" layer as it probably has
     // to do with ABI concerns. We do not, however, apply such treatment to
@@ -569,7 +517,7 @@ fn symbol_export_level(tcx: TyCtxt<'_>, sym_def_id: DefId) -> SymbolExportLevel 
     // core/std/allocators/etc. For example symbols used to hook up allocation
     // are not considered for export
     let codegen_fn_attrs = tcx.codegen_fn_attrs(sym_def_id);
-    let is_extern = codegen_fn_attrs.contains_extern_indicator(tcx, sym_def_id);
+    let is_extern = codegen_fn_attrs.contains_extern_indicator();
     let std_internal =
         codegen_fn_attrs.flags.contains(CodegenFnAttrFlags::RUSTC_STD_INTERNAL_SYMBOL);
 
@@ -711,11 +659,11 @@ pub(crate) fn linking_symbol_name_for_instance_in_crate<'tcx>(
         return undecorated;
     }
 
-    let prefix = match &target.arch[..] {
-        "x86" => Some('_'),
-        "x86_64" => None,
+    let prefix = match target.arch {
+        Arch::X86 => Some('_'),
+        Arch::X86_64 => None,
         // Only functions are decorated for arm64ec.
-        "arm64ec" if export_kind == SymbolExportKind::Text => Some('#'),
+        Arch::Arm64EC if export_kind == SymbolExportKind::Text => Some('#'),
         // Only x86/64 and arm64ec use symbol decorations.
         _ => return undecorated,
     };

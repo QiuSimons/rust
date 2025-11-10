@@ -12,8 +12,8 @@ use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::{CRATE_DEF_ID, LOCAL_CRATE, LocalDefId, LocalModDefId};
 use rustc_hir::intravisit::{self, Visitor, VisitorExt};
 use rustc_hir::{
-    self as hir, AmbigArg, ConstStability, DefaultBodyStability, FieldDef, Item, ItemKind,
-    Stability, StabilityLevel, StableSince, TraitRef, Ty, TyKind, UnstableReason,
+    self as hir, AmbigArg, ConstStability, DefaultBodyStability, FieldDef, HirId, Item, ItemKind,
+    Path, Stability, StabilityLevel, StableSince, TraitRef, Ty, TyKind, UnstableReason, UsePath,
     VERSION_PLACEHOLDER, Variant, find_attr,
 };
 use rustc_middle::hir::nested_filter;
@@ -21,8 +21,8 @@ use rustc_middle::middle::lib_features::{FeatureStability, LibFeatures};
 use rustc_middle::middle::privacy::EffectiveVisibilities;
 use rustc_middle::middle::stability::{AllowUnstable, Deprecated, DeprecationEntry, EvalResult};
 use rustc_middle::query::{LocalCrate, Providers};
-use rustc_middle::ty::TyCtxt;
 use rustc_middle::ty::print::with_no_trimmed_paths;
+use rustc_middle::ty::{AssocContainer, TyCtxt};
 use rustc_session::lint;
 use rustc_session::lint::builtin::{DEPRECATED, INEFFECTIVE_UNSTABLE_TRAIT_IMPL};
 use rustc_span::{Span, Symbol, sym};
@@ -486,8 +486,7 @@ impl<'tcx> Visitor<'tcx> for MissingStabilityAnnotations<'tcx> {
 
     fn visit_impl_item(&mut self, ii: &'tcx hir::ImplItem<'tcx>) {
         self.check_compatible_stability(ii.owner_id.def_id);
-        let impl_def_id = self.tcx.hir_get_parent_item(ii.hir_id());
-        if self.tcx.impl_trait_ref(impl_def_id).is_none() {
+        if let hir::ImplItemImplKind::Inherent { .. } = ii.impl_kind {
             self.check_missing_stability(ii.owner_id.def_id);
             self.check_missing_const_stability(ii.owner_id.def_id);
         }
@@ -711,7 +710,7 @@ impl<'tcx> Visitor<'tcx> for Checker<'tcx> {
                 for impl_item_ref in items {
                     let impl_item = self.tcx.associated_item(impl_item_ref.owner_id);
 
-                    if let Some(def_id) = impl_item.trait_item_def_id {
+                    if let AssocContainer::TraitImpl(Ok(def_id)) = impl_item.container {
                         // Pass `None` to skip deprecation warnings.
                         self.tcx.check_stability(
                             def_id,
@@ -738,6 +737,35 @@ impl<'tcx> Visitor<'tcx> for Checker<'tcx> {
             hir::BoundConstness::Never => {}
         }
         intravisit::walk_poly_trait_ref(self, t);
+    }
+
+    fn visit_use(&mut self, path: &'tcx UsePath<'tcx>, hir_id: HirId) {
+        let res = path.res;
+
+        // A use item can import something from two namespaces at the same time.
+        // For deprecation/stability we don't want to warn twice.
+        // This specifically happens with constructors for unit/tuple structs.
+        if let Some(ty_ns_res) = res.type_ns
+            && let Some(value_ns_res) = res.value_ns
+            && let Some(type_ns_did) = ty_ns_res.opt_def_id()
+            && let Some(value_ns_did) = value_ns_res.opt_def_id()
+            && let DefKind::Ctor(.., _) = self.tcx.def_kind(value_ns_did)
+            && self.tcx.parent(value_ns_did) == type_ns_did
+        {
+            // Only visit the value namespace path when we've detected a duplicate,
+            // not the type namespace path.
+            let UsePath { segments, res: _, span } = *path;
+            self.visit_path(&Path { segments, res: value_ns_res, span }, hir_id);
+
+            // Though, visit the macro namespace if it exists,
+            // regardless of the checks above relating to constructors.
+            if let Some(res) = res.macro_ns {
+                self.visit_path(&Path { segments, res, span }, hir_id);
+            }
+        } else {
+            // if there's no duplicate, just walk as normal
+            intravisit::walk_use(self, path, hir_id)
+        }
     }
 
     fn visit_path(&mut self, path: &hir::Path<'tcx>, id: hir::HirId) {

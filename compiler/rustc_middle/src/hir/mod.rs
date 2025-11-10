@@ -10,7 +10,7 @@ use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::sorted_map::SortedMap;
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_data_structures::sync::{DynSend, DynSync, try_par_for_each_in};
-use rustc_hir::def::DefKind;
+use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::{DefId, LocalDefId, LocalModDefId};
 use rustc_hir::lints::DelayedLint;
 use rustc_hir::*;
@@ -18,7 +18,7 @@ use rustc_macros::{Decodable, Encodable, HashStable};
 use rustc_span::{ErrorGuaranteed, ExpnId, Span};
 
 use crate::query::Providers;
-use crate::ty::{EarlyBinder, ImplSubject, TyCtxt};
+use crate::ty::TyCtxt;
 
 /// Gather the LocalDefId for each item-like within a module, including items contained within
 /// bodies. The Ids are in visitor order. This is used to partition a pass between modules.
@@ -154,13 +154,6 @@ impl<'tcx> TyCtxt<'tcx> {
         LocalModDefId::new_unchecked(id)
     }
 
-    pub fn impl_subject(self, def_id: DefId) -> EarlyBinder<'tcx, ImplSubject<'tcx>> {
-        match self.impl_trait_ref(def_id) {
-            Some(t) => t.map_bound(ImplSubject::Trait),
-            None => self.type_of(def_id).map_bound(ImplSubject::Inherent),
-        }
-    }
-
     /// Returns `true` if this is a foreign item (i.e., linked via `extern { ... }`).
     pub fn is_foreign_item(self, def_id: impl Into<DefId>) -> bool {
         self.opt_parent(def_id.into())
@@ -209,6 +202,20 @@ impl<'tcx> TyCtxt<'tcx> {
                 delayed_lints_hash: Some(h3),
             }
         })
+    }
+
+    pub fn qpath_is_lang_item(self, qpath: QPath<'_>, lang_item: LangItem) -> bool {
+        self.qpath_lang_item(qpath) == Some(lang_item)
+    }
+
+    /// This does not use typeck results since this is intended to be used with generated code.
+    pub fn qpath_lang_item(self, qpath: QPath<'_>) -> Option<LangItem> {
+        if let QPath::Resolved(_, path) = qpath
+            && let Res::Def(_, def_id) = path.res
+        {
+            return self.lang_items().from_def_id(def_id);
+        }
+        None
     }
 }
 

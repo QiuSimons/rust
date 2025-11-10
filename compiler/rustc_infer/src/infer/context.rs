@@ -1,4 +1,4 @@
-///! Definition of `InferCtxtLike` from the librarified type layer.
+//! Definition of `InferCtxtLike` from the librarified type layer.
 use rustc_hir::def_id::DefId;
 use rustc_middle::traits::ObligationCause;
 use rustc_middle::ty::relate::RelateResult;
@@ -20,10 +20,6 @@ impl<'tcx> rustc_type_ir::InferCtxtLike for InferCtxt<'tcx> {
 
     fn next_trait_solver(&self) -> bool {
         self.next_trait_solver
-    }
-
-    fn in_hir_typeck(&self) -> bool {
-        self.in_hir_typeck
     }
 
     fn typing_mode(&self) -> ty::TypingMode<'tcx> {
@@ -61,6 +57,10 @@ impl<'tcx> rustc_type_ir::InferCtxtLike for InferCtxt<'tcx> {
 
     fn root_ty_var(&self, var: ty::TyVid) -> ty::TyVid {
         self.root_var(var)
+    }
+
+    fn sub_unification_table_root_var(&self, var: ty::TyVid) -> ty::TyVid {
+        self.sub_unification_table_root_var(var)
     }
 
     fn root_const_var(&self, var: ty::ConstVid) -> ty::ConstVid {
@@ -183,6 +183,10 @@ impl<'tcx> rustc_type_ir::InferCtxtLike for InferCtxt<'tcx> {
         self.inner.borrow_mut().type_variables().equate(a, b);
     }
 
+    fn sub_unify_ty_vids_raw(&self, a: ty::TyVid, b: ty::TyVid) {
+        self.sub_unify_ty_vids_raw(a, b);
+    }
+
     fn equate_int_vids_raw(&self, a: ty::IntVid, b: ty::IntVid) {
         self.inner.borrow_mut().int_unification_table().union(a, b);
     }
@@ -298,6 +302,9 @@ impl<'tcx> rustc_type_ir::InferCtxtLike for InferCtxt<'tcx> {
             .map(|(k, h)| (k, h.ty))
             .collect()
     }
+    fn opaques_with_sub_unified_hidden_type(&self, ty: ty::TyVid) -> Vec<ty::AliasTy<'tcx>> {
+        self.opaques_with_sub_unified_hidden_type(ty)
+    }
 
     fn register_hidden_type_in_storage(
         &self,
@@ -307,7 +314,7 @@ impl<'tcx> rustc_type_ir::InferCtxtLike for InferCtxt<'tcx> {
     ) -> Option<Ty<'tcx>> {
         self.register_hidden_type_in_storage(
             opaque_type_key,
-            ty::OpaqueHiddenType { span, ty: hidden_ty },
+            ty::ProvisionalHiddenType { span, ty: hidden_ty },
         )
     }
     fn add_duplicate_opaque_type(
@@ -319,7 +326,7 @@ impl<'tcx> rustc_type_ir::InferCtxtLike for InferCtxt<'tcx> {
         self.inner
             .borrow_mut()
             .opaque_types()
-            .add_duplicate(opaque_type_key, ty::OpaqueHiddenType { span, ty: hidden_ty })
+            .add_duplicate(opaque_type_key, ty::ProvisionalHiddenType { span, ty: hidden_ty })
     }
 
     fn reset_opaque_types(&self) {
