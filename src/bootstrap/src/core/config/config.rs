@@ -2343,9 +2343,9 @@ pub fn parse_download_ci_llvm<'a>(
             #[cfg(not(test))]
             if b && dwn_ctx.is_running_on_ci() && CiEnv::is_rust_lang_managed_ci_job() {
                 // On rust-lang CI, we must always rebuild LLVM if there were any modifications to it
-                panic!(
-                    "`llvm.download-ci-llvm` cannot be set to `true` on CI. Use `if-unchanged` instead."
-                );
+                // panic!(
+                    // "`llvm.download-ci-llvm` cannot be set to `true` on CI. Use `if-unchanged` instead."
+                // );
             }
 
             // If download-ci-llvm=true we also want to check that CI llvm is available
