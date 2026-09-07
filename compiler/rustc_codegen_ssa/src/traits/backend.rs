@@ -2,16 +2,16 @@ use std::any::Any;
 use std::hash::Hash;
 
 use rustc_ast::expand::allocator::AllocatorMethod;
-use rustc_data_structures::fx::FxIndexMap;
 use rustc_data_structures::sync::{DynSend, DynSync};
 use rustc_metadata::EncodedMetadata;
 use rustc_metadata::creader::MetadataLoaderDyn;
-use rustc_middle::dep_graph::{WorkProduct, WorkProductId};
+use rustc_middle::dep_graph::WorkProductMap;
 use rustc_middle::ty::TyCtxt;
 use rustc_middle::util::Providers;
-use rustc_session::Session;
-use rustc_session::config::{CrateType, OutputFilenames, PrintRequest};
+use rustc_session::config::{OutputFilenames, PrintRequest};
+use rustc_session::{IncrCompSession, Session};
 use rustc_span::Symbol;
+use rustc_structures::CrateType;
 
 use super::CodegenObject;
 use crate::back::archive::ArArchiveBuilderBuilder;
@@ -45,8 +45,7 @@ pub trait CodegenBackend {
     /// `target_feature` and support for unstable float types.
     fn target_config(&self, _sess: &Session) -> TargetConfig {
         TargetConfig {
-            target_features: vec![],
-            unstable_target_features: vec![],
+            internal_target_features: Default::default(),
             // `true` is used as a default so backends need to acknowledge when they do not
             // support the float types, rather than accidentally quietly skipping all tests.
             has_reliable_f16: true,
@@ -128,9 +127,10 @@ pub trait CodegenBackend {
         &self,
         ongoing_codegen: Box<dyn Any>,
         sess: &Session,
+        incr_comp_session: Option<&IncrCompSession>,
         outputs: &OutputFilenames,
         crate_info: &CrateInfo,
-    ) -> (CompiledModules, FxIndexMap<WorkProductId, WorkProduct>);
+    ) -> (CompiledModules, WorkProductMap);
 
     fn print_pass_timings(&self) {}
 

@@ -1,9 +1,10 @@
+use rustc_data_structures::thin_vec::ThinVec;
 use rustc_middle::mir::*;
 use rustc_middle::ty::{self, TyCtxt};
 use tracing::debug;
 
 use crate::patch::MirPatch;
-use crate::util;
+use crate::{PassPolicy, util};
 
 /// This pass moves values being dropped that are within a packed
 /// struct to a separate local before dropping them, to ensure that
@@ -69,8 +70,9 @@ impl<'tcx> crate::MirPass<'tcx> for AddMovesForPackedDrops {
         patch.apply(body);
     }
 
-    fn is_required(&self) -> bool {
-        true
+    fn policy(&self, _ctx: &crate::PassCtx<'_>) -> PassPolicy {
+        // Implements part of MIR semantics by making implicit packed-drop handling explicit.
+        PassPolicy::Required
     }
 }
 
@@ -93,7 +95,11 @@ fn add_move_for_packed_drop<'tcx>(
 
     let storage_dead_block = patch.new_block(BasicBlockData::new_stmts(
         vec![Statement::new(source_info, StatementKind::StorageDead(temp))],
-        Some(Terminator { source_info, kind: TerminatorKind::Goto { target } }),
+        Some(Terminator {
+            source_info,
+            kind: TerminatorKind::Goto { target },
+            attributes: ThinVec::new(),
+        }),
         is_cleanup,
     ));
 

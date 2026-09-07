@@ -4,13 +4,12 @@ use rustc_data_structures::fx::FxIndexMap;
 use rustc_data_structures::sorted_map::SortedMap;
 use rustc_errors::{Diag, DiagLocation, Diagnostic, MultiSpan};
 use rustc_hir::{HirId, ItemLocalId};
-use rustc_lint_defs::EditionFcw;
+use rustc_lint_defs::{
+    EditionFcw, FutureIncompatibilityReason, Level, Lint, LintExpectationId, LintId,
+    StableLintExpectationId, UnstableLintExpectationId, builtin,
+};
 use rustc_macros::{Decodable, Encodable, StableHash};
 use rustc_session::Session;
-use rustc_session::lint::{
-    FutureIncompatibilityReason, Level, Lint, LintExpectationId, LintId, StableLintExpectationId,
-    UnstableLintExpectationId, builtin,
-};
 use rustc_span::{DUMMY_SP, ExpnKind, Span, Symbol, kw};
 use tracing::instrument;
 
@@ -514,7 +513,7 @@ pub fn emit_lint_base<'a, D: Diagnostic<'a, ()> + 'a>(
             err.disable_suggestions();
         }
 
-        err.is_lint(lint.name_lower(), has_future_breakage);
+        err.is_lint(lint.name_lower(), has_future_breakage, lint.rust_version);
         // Lint diagnostics that are covered by the expect level will not be emitted outside
         // the compiler. It is therefore not necessary to add any information for the user.
         // This will therefore directly call the decorate function which will in turn emit

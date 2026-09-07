@@ -1,4 +1,4 @@
-use crate::grammar::entry::prefix::pat;
+use crate::grammar::entry::prefix::pat_top;
 
 use super::*;
 
@@ -393,11 +393,17 @@ pub(super) fn opt_type_bounds_as_dyn_trait_type(
     p: &mut Parser<'_>,
     type_marker: CompletedMarker,
 ) -> CompletedMarker {
-    assert!(matches!(
-        type_marker.kind(),
-        SyntaxKind::PATH_TYPE | SyntaxKind::FOR_TYPE | SyntaxKind::MACRO_TYPE
-    ));
+    assert!(matches!(type_marker.kind(), PATH_TYPE | FOR_TYPE | MACRO_TYPE));
     if !p.at(T![+]) {
+        return type_marker;
+    }
+
+    // test_err macro_as_type_bound
+    // fn main() { let x: foo!() + bar!() + baz!(); }
+
+    // `foo!() + ...` is invalid syntax for type bounds,
+    // gracefully exit and let the caller handle the error
+    if type_marker.kind() == MACRO_TYPE {
         return type_marker;
     }
 
@@ -430,7 +436,7 @@ fn pattern_type(p: &mut Parser<'_>) {
         if !p.eat_contextual_kw(T![is]) {
             p.error("expected `is`")
         }
-        pat(p);
+        pat_top(p);
         p.expect(T![')']);
         m.complete(p, PATTERN_TYPE);
     } else {

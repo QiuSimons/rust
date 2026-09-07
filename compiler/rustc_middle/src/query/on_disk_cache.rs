@@ -114,11 +114,11 @@ struct Footer {
 struct SourceFileIndex(u32);
 
 #[derive(Copy, Clone, Debug, Hash, Eq, PartialEq, Encodable, Decodable)]
-pub struct AbsoluteBytePos(u64);
+struct AbsoluteBytePos(u64);
 
 impl AbsoluteBytePos {
     #[inline]
-    pub fn new(pos: usize) -> AbsoluteBytePos {
+    fn new(pos: usize) -> AbsoluteBytePos {
         AbsoluteBytePos(pos.try_into().expect("Incremental cache file size overflowed u64."))
     }
 
@@ -201,7 +201,7 @@ impl OnDiskCache {
 
     /// Serialize the current-session data that will be loaded by [`OnDiskCache`]
     /// in a subsequent incremental compilation session.
-    pub fn serialize(tcx: TyCtxt<'_>, encoder: FileEncoder) -> FileEncodeResult {
+    pub fn serialize(tcx: TyCtxt<'_>, encoder: FileEncoder<'static>) -> FileEncodeResult {
         // Serializing the `DepGraph` should not modify it.
         tcx.dep_graph.with_ignore(|| {
             // Allocate `SourceFileIndex`es.
@@ -333,13 +333,6 @@ impl OnDiskCache {
         let side_effect: Option<QuerySideEffect> =
             self.load_indexed(tcx, dep_node_index, &self.side_effects_index);
         side_effect
-    }
-
-    /// Returns true if there is a disk-cached query return value for the given node.
-    #[inline]
-    pub fn loadable_from_disk(&self, dep_node_index: SerializedDepNodeIndex) -> bool {
-        self.query_values_index.contains_key(&dep_node_index)
-        // with_decoder is infallible, so we can stop here
     }
 
     /// Returns the disk-cached query return value for the given node, if there is one.
@@ -489,11 +482,6 @@ where
 impl<'a, 'tcx> TyDecoder<'tcx> for CacheDecoder<'a, 'tcx> {
     const CLEAR_CROSS_CRATE: bool = false;
 
-    #[inline]
-    fn interner(&self) -> TyCtxt<'tcx> {
-        self.tcx
-    }
-
     fn cached_ty_for_shorthand<F>(&mut self, shorthand: usize, or_insert_with: F) -> Ty<'tcx>
     where
         F: FnOnce(&mut Self) -> Ty<'tcx>,
@@ -502,13 +490,13 @@ impl<'a, 'tcx> TyDecoder<'tcx> for CacheDecoder<'a, 'tcx> {
 
         let cache_key = ty::CReaderCacheKey { cnum: None, pos: shorthand };
 
-        if let Some(&ty) = tcx.ty_rcache.borrow().get(&cache_key) {
+        if let Some(&ty) = tcx.caches.ty_rcache.borrow().get(&cache_key) {
             return ty;
         }
 
         let ty = or_insert_with(self);
         // This may overwrite the entry, but it should overwrite with the same value.
-        tcx.ty_rcache.borrow_mut().insert_same(cache_key, ty);
+        tcx.caches.ty_rcache.borrow_mut().insert_same(cache_key, ty);
         ty
     }
 
@@ -528,6 +516,15 @@ impl<'a, 'tcx> TyDecoder<'tcx> for CacheDecoder<'a, 'tcx> {
     fn decode_alloc_id(&mut self) -> interpret::AllocId {
         let alloc_decoding_session = self.alloc_decoding_session;
         alloc_decoding_session.decode_alloc_id(self)
+    }
+}
+
+impl<'a, 'tcx> rustc_type_ir::InternerDecoder for CacheDecoder<'a, 'tcx> {
+    type Interner = TyCtxt<'tcx>;
+
+    #[inline]
+    fn interner(&self) -> Self::Interner {
+        self.tcx
     }
 }
 
@@ -779,7 +776,7 @@ impl_ref_decoder! {<'tcx>
 /// An encoder that can write to the incremental compilation cache.
 pub struct CacheEncoder<'a, 'tcx> {
     tcx: TyCtxt<'tcx>,
-    encoder: FileEncoder,
+    encoder: FileEncoder<'static>,
     type_shorthands: FxHashMap<Ty<'tcx>, usize>,
     predicate_shorthands: FxHashMap<ty::PredicateKind<'tcx>, usize>,
     interpret_allocs: FxIndexSet<interpret::AllocId>,

@@ -6,7 +6,8 @@
 const fn with_positive<F: for<'a> [const] Fn(&'a ())>() {}
 
 const _: () = {
-    with_positive::<()>(); //~ ERROR expected a `Fn(&'a ())` closure, found `()`
+    with_positive::<()>();
+    //~^ ERROR expected an `Fn(&'a ())` closure, found `()`
 };
 
 fn main() {}

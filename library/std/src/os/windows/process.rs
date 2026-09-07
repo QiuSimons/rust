@@ -148,9 +148,6 @@ impl From<OwnedHandle> for process::ChildStderr {
 }
 
 /// Windows-specific extensions to [`process::ExitStatus`].
-///
-/// This trait is sealed: it cannot be implemented outside the standard library.
-/// This is so that future additional methods are not breaking changes.
 #[stable(feature = "exit_status_from", since = "1.12.0")]
 pub impl(self) trait ExitStatusExt {
     /// Creates a new `ExitStatus` from the raw underlying `u32` return value of
@@ -167,9 +164,6 @@ impl ExitStatusExt for process::ExitStatus {
 }
 
 /// Windows-specific extensions to the [`process::Command`] builder.
-///
-/// This trait is sealed: it cannot be implemented outside the standard library.
-/// This is so that future additional methods are not breaking changes.
 #[stable(feature = "windows_process_extensions", since = "1.16.0")]
 pub impl(self) trait CommandExt {
     /// Sets the [process creation flags][1] to be passed to `CreateProcess`.
@@ -179,6 +173,15 @@ pub impl(self) trait CommandExt {
     /// [1]: https://docs.microsoft.com/en-us/windows/win32/procthread/process-creation-flags
     #[stable(feature = "windows_process_extensions", since = "1.16.0")]
     fn creation_flags(&mut self, flags: u32) -> &mut process::Command;
+
+    /// Places the child process on the desktop named `desktop` by setting the
+    /// `lpDesktop` field of the [STARTUPINFO][1] passed to `CreateProcess`.
+    ///
+    /// The name may be a desktop or a `window-station\desktop` path.
+    ///
+    /// [1]: <https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/ns-processthreadsapi-startupinfow>
+    #[unstable(feature = "windows_process_extensions_desktop", issue = "158852")]
+    fn desktop<S: AsRef<OsStr>>(&mut self, desktop: S) -> &mut process::Command;
 
     /// Sets the field `wShowWindow` of [STARTUPINFO][1] that is passed to `CreateProcess`.
     /// Allowed values are the ones listed in
@@ -279,7 +282,8 @@ pub impl(self) trait CommandExt {
     ///
     /// # Example
     ///
-    /// ```
+    #[cfg_attr(windows, doc = "```")]
+    #[cfg_attr(not(windows), doc = "```ignore (needs windows)")]
     /// #![feature(windows_process_extensions_async_pipes)]
     /// use std::os::windows::process::CommandExt;
     /// use std::process::{Command, Stdio};
@@ -310,7 +314,8 @@ pub impl(self) trait CommandExt {
     ///
     /// # Example
     ///
-    /// ```
+    #[cfg_attr(windows, doc = "```")]
+    #[cfg_attr(not(windows), doc = "```ignore (needs windows)")]
     /// #![feature(windows_process_extensions_raw_attribute)]
     /// use std::os::windows::io::AsRawHandle;
     /// use std::os::windows::process::{CommandExt, ProcThreadAttributeList};
@@ -387,6 +392,11 @@ impl CommandExt for process::Command {
         self
     }
 
+    fn desktop<S: AsRef<OsStr>>(&mut self, desktop: S) -> &mut process::Command {
+        self.as_inner_mut().desktop(desktop.as_ref());
+        self
+    }
+
     fn show_window(&mut self, cmd_show: u16) -> &mut process::Command {
         self.as_inner_mut().show_window(Some(cmd_show));
         self
@@ -456,9 +466,6 @@ impl ChildExt for process::Child {
 }
 
 /// Windows-specific extensions to [`process::ExitCode`].
-///
-/// This trait is sealed: it cannot be implemented outside the standard library.
-/// This is so that future additional methods are not breaking changes.
 #[unstable(feature = "windows_process_exit_code_from", issue = "111688")]
 pub impl(self) trait ExitCodeExt {
     /// Creates a new `ExitCode` from the raw underlying `u32` return value of
@@ -572,8 +579,9 @@ impl<'a> ProcThreadAttributeListBuilder<'a> {
     ///
     /// # Example
     ///
-    #[cfg_attr(target_vendor = "win7", doc = "```no_run")]
-    #[cfg_attr(not(target_vendor = "win7"), doc = "```")]
+    #[cfg_attr(not(windows), doc = "```ignore (needs windows)")]
+    #[cfg_attr(all(windows, target_vendor = "win7"), doc = "```no_run")]
+    #[cfg_attr(all(windows, not(target_vendor = "win7")), doc = "```")]
     /// #![feature(windows_process_extensions_raw_attribute)]
     /// use std::ffi::c_void;
     /// use std::os::windows::process::{CommandExt, ProcThreadAttributeList};

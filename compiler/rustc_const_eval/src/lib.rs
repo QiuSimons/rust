@@ -1,8 +1,8 @@
 // tidy-alphabetical-start
+#![cfg_attr(bootstrap, feature(never_type))]
 #![feature(array_try_map)]
 #![feature(decl_macro)]
 #![feature(deref_patterns)]
-#![feature(never_type)]
 #![feature(slice_ptr_get)]
 #![feature(trait_alias)]
 #![feature(unqualified_local_imports)]
@@ -12,7 +12,7 @@
 
 pub mod check_consts;
 pub mod const_eval;
-mod errors;
+mod diagnostics;
 pub mod interpret;
 pub mod util;
 
@@ -32,9 +32,10 @@ fn assert_typing_mode(typing_mode: ty::TypingMode<'_>) {
             // Const eval always happens in PostAnalysis or Codegen mode. See the comment in
             // `InterpCx::new` for more details.
             ty::TypingMode::Coherence
-            | ty::TypingMode::Analysis { .. }
-            | ty::TypingMode::Borrowck { .. }
-            | ty::TypingMode::PostBorrowckAnalysis { .. } => bug!(
+            | ty::TypingMode::Typeck { .. }
+            | ty::TypingMode::Reflection
+            | ty::TypingMode::PostTypeckUntilBorrowck { .. }
+            | ty::TypingMode::PostBorrowck { .. } => bug!(
                 "Const eval should always happens in PostAnalysis or Codegen mode. See the comment on `assert_typing_mode` for more details."
             ),
         }

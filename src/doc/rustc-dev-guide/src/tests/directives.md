@@ -51,7 +51,7 @@ Directives can generally be found by browsing the
 
 ### Auxiliary builds
 
-See [Building auxiliary crates](compiletest.html#building-auxiliary-crates)
+See [Building auxiliary crates](compiletest.md#building-auxiliary-crates)
 
 | Directive             | Explanation                                                                                           | Supported test suites                  | Possible values                                                    |
 |-----------------------|-------------------------------------------------------------------------------------------------------|----------------------------------------|--------------------------------------------------------------------|
@@ -62,7 +62,7 @@ See [Building auxiliary crates](compiletest.html#building-auxiliary-crates)
 | `proc-macro`          | Similar to `aux-build`, but for aux forces host and don't use `-Cprefer-dynamic`[^pm].                | All except `run-make`/`run-make-cargo` | Path to auxiliary proc-macro `.rs` file                            |
 | `build-aux-docs`      | Build docs for auxiliaries as well.  Note that this only works with `aux-build`, not `aux-crate`.     | All except `run-make`/`run-make-cargo` | N/A                                                                |
 
-[^pm]: please see the [Auxiliary proc-macro section](compiletest.html#auxiliary-proc-macro) in the compiletest chapter for specifics.
+[^pm]: please see the [Auxiliary proc-macro section](compiletest.md#auxiliary-proc-macro) in the compiletest chapter for specifics.
 
 ### Controlling outcome expectations
 
@@ -165,7 +165,8 @@ The following directives will check rustc build settings and target settings:
   via `--target`, use `needs-llvm-components` instead to ensure the appropriate
   backend is available.
 - `needs-asm-ret` - ignores if the target does not have a `ret` instruction
-  in its assembly syntax. Most target architectures have this instruction,
+  in its assembly syntax.
+  Most target architectures have this instruction,
   making it handy for portable inline-assembly tests, but some architectures
   (e.g. 32-bit ARM) do not have it.
 - `needs-profiler-runtime` — ignores the test if the profiler runtime was not
@@ -230,8 +231,8 @@ The following directives will check LLVM support:
   `COMPILETEST_REQUIRE_ALL_LLVM_COMPONENTS` is set) if the component does not exist.
 - `needs-forced-clang-based-tests` — test is ignored unless the environment
   variable `RUSTBUILD_FORCE_CLANG_BASED_TESTS` is set, which enables building clang alongside LLVM
-  - This is only set in two CI jobs ([`x86_64-gnu-debug`] and
-    [`aarch64-gnu-debug`]), which only runs a subset of `run-make` tests.
+  - This is only set in two CI jobs ([`test-x86_64-gnu-debug`] and
+    [`test-aarch64-gnu-debug`]), which only runs a subset of `run-make` tests.
     Other tests with this directive will not run at all, which is usually not what you want.
 
 See also [Debuginfo tests](compiletest.md#debuginfo-tests) for directives for ignoring debuggers.
@@ -308,7 +309,7 @@ separate tools.
 For more information, please read their respective chapters as linked above.
 
 [rustdoc-html-tests]: ../rustdoc-internals/rustdoc-html-test-suite.md
-[rustdoc-js-tests]: ../rustdoc-internals/search.html#testing-the-search-engine
+[rustdoc-js-tests]: ../rustdoc-internals/search.md#testing-the-search-engine
 [rustdoc-json-tests]: ../rustdoc-internals/rustdoc-json-test-suite.md
 
 ### Pretty printing

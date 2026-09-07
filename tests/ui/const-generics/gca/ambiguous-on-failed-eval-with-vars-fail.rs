@@ -4,10 +4,12 @@
 // runs on the old solver, just in case someone attempts to implement GCA for the old solver and
 // removes the restriction that -Znext-solver must be enabled)
 
-#![feature(generic_const_items)]
-#![feature(min_generic_const_args)]
-#![feature(generic_const_args)]
+#![feature(
+    min_generic_const_args,
+    generic_const_args,
 //[old]~^ ERROR next-solver
+    generic_const_items
+)]
 #![expect(incomplete_features)]
 
 const FREE<const A: usize>: usize = 10;
@@ -21,7 +23,7 @@ impl Trait for S {
     const PROJ<const A: usize>: usize = 10;
 }
 
-fn free<const N: usize>() -> ([(); N], [(); FREE::<N>]) {
+fn free<const N: usize>() -> ([(); N], [(); core::direct_const_arg!(FREE::<N>)]) {
     loop {}
 }
 
@@ -33,12 +35,12 @@ fn test_free() {
 
 fn test_free_mismatch() {
     let (mut arr, mut arr_with_weird_len) = free();
-    //[next]~^ ERROR type mismatch resolving `10 == 2`
+    //[next]~^ ERROR type mismatch resolving `FREE<10> == 2`
     arr_with_weird_len = [(); 2];
     arr = [(); 10];
 }
 
-fn proj<const N: usize>() -> ([(); N], [(); <S as Trait>::PROJ::<N>]) {
+fn proj<const N: usize>() -> ([(); N], [(); core::direct_const_arg!(<S as Trait>::PROJ::<N>)]) {
     loop {}
 }
 
@@ -50,7 +52,7 @@ fn test_proj() {
 
 fn test_proj_mismatch() {
     let (mut arr, mut arr_with_weird_len) = proj();
-    //[next]~^ ERROR type mismatch resolving `10 == 2`
+    //[next]~^ ERROR type mismatch resolving `<S as Trait>::PROJ<10> == 2`
     arr_with_weird_len = [(); 2];
     arr = [(); 10];
 }

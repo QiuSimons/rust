@@ -59,6 +59,7 @@ impl ArrayType {
 pub struct AsmClobberAbi {
     pub(crate) syntax: SyntaxNode,
 }
+impl ast::HasAttrs for AsmClobberAbi {}
 impl AsmClobberAbi {
     #[inline]
     pub fn l_paren_token(&self) -> Option<SyntaxToken> { support::token(&self.syntax, T!['(']) }
@@ -150,6 +151,7 @@ impl AsmOperandExpr {
 pub struct AsmOperandNamed {
     pub(crate) syntax: SyntaxNode,
 }
+impl ast::HasAttrs for AsmOperandNamed {}
 impl ast::HasName for AsmOperandNamed {}
 impl AsmOperandNamed {
     #[inline]
@@ -193,6 +195,7 @@ impl AsmOption {
 pub struct AsmOptions {
     pub(crate) syntax: SyntaxNode,
 }
+impl ast::HasAttrs for AsmOptions {}
 impl AsmOptions {
     #[inline]
     pub fn asm_options(&self) -> AstChildren<AsmOption> { support::children(&self.syntax) }
@@ -720,16 +723,10 @@ impl ForType {
 pub struct FormatArgsArg {
     pub(crate) syntax: SyntaxNode,
 }
+impl ast::HasName for FormatArgsArg {}
 impl FormatArgsArg {
     #[inline]
-    pub fn arg_name(&self) -> Option<FormatArgsArgName> { support::child(&self.syntax) }
-    #[inline]
     pub fn expr(&self) -> Option<Expr> { support::child(&self.syntax) }
-}
-pub struct FormatArgsArgName {
-    pub(crate) syntax: SyntaxNode,
-}
-impl FormatArgsArgName {
     #[inline]
     pub fn eq_token(&self) -> Option<SyntaxToken> { support::token(&self.syntax, T![=]) }
 }
@@ -844,6 +841,19 @@ impl ImplTraitType {
     pub fn type_bound_list(&self) -> Option<TypeBoundList> { support::child(&self.syntax) }
     #[inline]
     pub fn impl_token(&self) -> Option<SyntaxToken> { support::token(&self.syntax, T![impl]) }
+}
+pub struct IncludeBytesExpr {
+    pub(crate) syntax: SyntaxNode,
+}
+impl IncludeBytesExpr {
+    #[inline]
+    pub fn pound_token(&self) -> Option<SyntaxToken> { support::token(&self.syntax, T![#]) }
+    #[inline]
+    pub fn builtin_token(&self) -> Option<SyntaxToken> { support::token(&self.syntax, T![builtin]) }
+    #[inline]
+    pub fn include_bytes_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, T![include_bytes])
+    }
 }
 pub struct IndexExpr {
     pub(crate) syntax: SyntaxNode,
@@ -2059,6 +2069,8 @@ impl Variant {
     pub fn field_list(&self) -> Option<FieldList> { support::child(&self.syntax) }
     #[inline]
     pub fn eq_token(&self) -> Option<SyntaxToken> { support::token(&self.syntax, T![=]) }
+    #[inline]
+    pub fn underscore_token(&self) -> Option<SyntaxToken> { support::token(&self.syntax, T![_]) }
 }
 pub struct VariantList {
     pub(crate) syntax: SyntaxNode,
@@ -2178,6 +2190,7 @@ pub enum AsmPiece {
     AsmOperandNamed(AsmOperandNamed),
     AsmOptions(AsmOptions),
 }
+impl ast::HasAttrs for AsmPiece {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum AssocItem {
@@ -2212,6 +2225,7 @@ pub enum Expr {
     ForExpr(ForExpr),
     FormatArgsExpr(FormatArgsExpr),
     IfExpr(IfExpr),
+    IncludeBytesExpr(IncludeBytesExpr),
     IndexExpr(IndexExpr),
     LetExpr(LetExpr),
     Literal(Literal),
@@ -4085,38 +4099,6 @@ impl fmt::Debug for FormatArgsArg {
         f.debug_struct("FormatArgsArg").field("syntax", &self.syntax).finish()
     }
 }
-impl AstNode for FormatArgsArgName {
-    #[inline]
-    fn kind() -> SyntaxKind
-    where
-        Self: Sized,
-    {
-        FORMAT_ARGS_ARG_NAME
-    }
-    #[inline]
-    fn can_cast(kind: SyntaxKind) -> bool { kind == FORMAT_ARGS_ARG_NAME }
-    #[inline]
-    fn cast(syntax: SyntaxNode) -> Option<Self> {
-        if Self::can_cast(syntax.kind()) { Some(Self { syntax }) } else { None }
-    }
-    #[inline]
-    fn syntax(&self) -> &SyntaxNode { &self.syntax }
-}
-impl hash::Hash for FormatArgsArgName {
-    fn hash<H: hash::Hasher>(&self, state: &mut H) { self.syntax.hash(state); }
-}
-impl Eq for FormatArgsArgName {}
-impl PartialEq for FormatArgsArgName {
-    fn eq(&self, other: &Self) -> bool { self.syntax == other.syntax }
-}
-impl Clone for FormatArgsArgName {
-    fn clone(&self) -> Self { Self { syntax: self.syntax.clone() } }
-}
-impl fmt::Debug for FormatArgsArgName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("FormatArgsArgName").field("syntax", &self.syntax).finish()
-    }
-}
 impl AstNode for FormatArgsExpr {
     #[inline]
     fn kind() -> SyntaxKind
@@ -4371,6 +4353,38 @@ impl Clone for ImplTraitType {
 impl fmt::Debug for ImplTraitType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ImplTraitType").field("syntax", &self.syntax).finish()
+    }
+}
+impl AstNode for IncludeBytesExpr {
+    #[inline]
+    fn kind() -> SyntaxKind
+    where
+        Self: Sized,
+    {
+        INCLUDE_BYTES_EXPR
+    }
+    #[inline]
+    fn can_cast(kind: SyntaxKind) -> bool { kind == INCLUDE_BYTES_EXPR }
+    #[inline]
+    fn cast(syntax: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(syntax.kind()) { Some(Self { syntax }) } else { None }
+    }
+    #[inline]
+    fn syntax(&self) -> &SyntaxNode { &self.syntax }
+}
+impl hash::Hash for IncludeBytesExpr {
+    fn hash<H: hash::Hasher>(&self, state: &mut H) { self.syntax.hash(state); }
+}
+impl Eq for IncludeBytesExpr {}
+impl PartialEq for IncludeBytesExpr {
+    fn eq(&self, other: &Self) -> bool { self.syntax == other.syntax }
+}
+impl Clone for IncludeBytesExpr {
+    fn clone(&self) -> Self { Self { syntax: self.syntax.clone() } }
+}
+impl fmt::Debug for IncludeBytesExpr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IncludeBytesExpr").field("syntax", &self.syntax).finish()
     }
 }
 impl AstNode for IndexExpr {
@@ -8101,6 +8115,10 @@ impl From<IfExpr> for Expr {
     #[inline]
     fn from(node: IfExpr) -> Expr { Expr::IfExpr(node) }
 }
+impl From<IncludeBytesExpr> for Expr {
+    #[inline]
+    fn from(node: IncludeBytesExpr) -> Expr { Expr::IncludeBytesExpr(node) }
+}
 impl From<IndexExpr> for Expr {
     #[inline]
     fn from(node: IndexExpr) -> Expr { Expr::IndexExpr(node) }
@@ -8205,6 +8223,7 @@ impl AstNode for Expr {
                 | FOR_EXPR
                 | FORMAT_ARGS_EXPR
                 | IF_EXPR
+                | INCLUDE_BYTES_EXPR
                 | INDEX_EXPR
                 | LET_EXPR
                 | LITERAL
@@ -8246,6 +8265,7 @@ impl AstNode for Expr {
             FOR_EXPR => Expr::ForExpr(ForExpr { syntax }),
             FORMAT_ARGS_EXPR => Expr::FormatArgsExpr(FormatArgsExpr { syntax }),
             IF_EXPR => Expr::IfExpr(IfExpr { syntax }),
+            INCLUDE_BYTES_EXPR => Expr::IncludeBytesExpr(IncludeBytesExpr { syntax }),
             INDEX_EXPR => Expr::IndexExpr(IndexExpr { syntax }),
             LET_EXPR => Expr::LetExpr(LetExpr { syntax }),
             LITERAL => Expr::Literal(Literal { syntax }),
@@ -8289,6 +8309,7 @@ impl AstNode for Expr {
             Expr::ForExpr(it) => &it.syntax,
             Expr::FormatArgsExpr(it) => &it.syntax,
             Expr::IfExpr(it) => &it.syntax,
+            Expr::IncludeBytesExpr(it) => &it.syntax,
             Expr::IndexExpr(it) => &it.syntax,
             Expr::LetExpr(it) => &it.syntax,
             Expr::Literal(it) => &it.syntax,
@@ -9041,7 +9062,10 @@ impl AstNode for AnyHasAttrs {
         matches!(
             kind,
             ARRAY_EXPR
+                | ASM_CLOBBER_ABI
                 | ASM_EXPR
+                | ASM_OPERAND_NAMED
+                | ASM_OPTIONS
                 | ASSOC_ITEM_LIST
                 | AWAIT_EXPR
                 | BECOME_EXPR
@@ -9139,9 +9163,21 @@ impl From<ArrayExpr> for AnyHasAttrs {
     #[inline]
     fn from(node: ArrayExpr) -> AnyHasAttrs { AnyHasAttrs { syntax: node.syntax } }
 }
+impl From<AsmClobberAbi> for AnyHasAttrs {
+    #[inline]
+    fn from(node: AsmClobberAbi) -> AnyHasAttrs { AnyHasAttrs { syntax: node.syntax } }
+}
 impl From<AsmExpr> for AnyHasAttrs {
     #[inline]
     fn from(node: AsmExpr) -> AnyHasAttrs { AnyHasAttrs { syntax: node.syntax } }
+}
+impl From<AsmOperandNamed> for AnyHasAttrs {
+    #[inline]
+    fn from(node: AsmOperandNamed) -> AnyHasAttrs { AnyHasAttrs { syntax: node.syntax } }
+}
+impl From<AsmOptions> for AnyHasAttrs {
+    #[inline]
+    fn from(node: AsmOptions) -> AnyHasAttrs { AnyHasAttrs { syntax: node.syntax } }
 }
 impl From<AssocItemList> for AnyHasAttrs {
     #[inline]
@@ -9736,6 +9772,7 @@ impl AstNode for AnyHasName {
                 | CONST_PARAM
                 | ENUM
                 | FN
+                | FORMAT_ARGS_ARG
                 | IDENT_PAT
                 | MACRO_DEF
                 | MACRO_RULES
@@ -9793,6 +9830,10 @@ impl From<Enum> for AnyHasName {
 impl From<Fn> for AnyHasName {
     #[inline]
     fn from(node: Fn) -> AnyHasName { AnyHasName { syntax: node.syntax } }
+}
+impl From<FormatArgsArg> for AnyHasName {
+    #[inline]
+    fn from(node: FormatArgsArg) -> AnyHasName { AnyHasName { syntax: node.syntax } }
 }
 impl From<IdentPat> for AnyHasName {
     #[inline]
@@ -10360,11 +10401,6 @@ impl std::fmt::Display for FormatArgsArg {
         std::fmt::Display::fmt(self.syntax(), f)
     }
 }
-impl std::fmt::Display for FormatArgsArgName {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(self.syntax(), f)
-    }
-}
 impl std::fmt::Display for FormatArgsExpr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(self.syntax(), f)
@@ -10401,6 +10437,11 @@ impl std::fmt::Display for ImplRestriction {
     }
 }
 impl std::fmt::Display for ImplTraitType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self.syntax(), f)
+    }
+}
+impl std::fmt::Display for IncludeBytesExpr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(self.syntax(), f)
     }

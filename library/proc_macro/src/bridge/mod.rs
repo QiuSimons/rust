@@ -9,9 +9,8 @@
 #![deny(unsafe_code)]
 
 use std::hash::Hash;
+use std::marker;
 use std::ops::{Bound, Range};
-use std::sync::Once;
-use std::{fmt, marker, mem, panic, thread};
 
 use crate::{Delimiter, Level};
 
@@ -34,7 +33,6 @@ use crate::{Delimiter, Level};
 macro_rules! with_api {
     ($m:ident, $TokenStream: path, $Span: path, $Symbol: path) => {
         $m! {
-            fn injected_env_var(var: &str) -> Option<String>;
             fn track_env_var(var: &str, value: Option<&str>);
             fn track_path(path: &str);
             fn literal_from_str(s: &str) -> Result<Literal<$Span, $Symbol>, String>;
@@ -100,6 +98,8 @@ mod handle;
 #[macro_use]
 #[forbid(unsafe_code)]
 mod rpc;
+#[forbid(unsafe_code)]
+mod panic_message;
 #[allow(unsafe_code)]
 mod selfless_reify;
 #[forbid(unsafe_code)]
@@ -108,7 +108,7 @@ pub mod server;
 mod symbol;
 
 use buffer::Buffer;
-pub use rpc::PanicMessage;
+pub use panic_message::PanicMessage;
 use rpc::{Decode, Encode};
 
 /// Configuration for establishing an active connection between a server and a

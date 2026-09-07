@@ -3,6 +3,7 @@ use std::mem;
 use rustc_feature::AttributeStability;
 
 use super::prelude::*;
+use crate::AttributeSafety;
 use crate::attributes::{NoArgsAttributeParser, SingleAttributeParser};
 use crate::context::AcceptContext;
 use crate::parser::ArgParser;
@@ -12,7 +13,7 @@ use crate::target_checking::Policy::{Allow, Warn};
 pub(crate) struct RustcSkipDuringMethodDispatchParser;
 impl SingleAttributeParser for RustcSkipDuringMethodDispatchParser {
     const PATH: &[Symbol] = &[sym::rustc_skip_during_method_dispatch];
-    const ALLOWED_TARGETS: AllowedTargets = AllowedTargets::AllowList(&[Allow(Target::Trait)]);
+    const ALLOWED_TARGETS: AllowedTargets<'_> = AllowedTargets::AllowList(&[Allow(Target::Trait)]);
 
     const TEMPLATE: AttributeTemplate = template!(List: &["array, boxed_slice"]);
     const STABILITY: AttributeStability = unstable!(rustc_attrs);
@@ -52,8 +53,8 @@ impl SingleAttributeParser for RustcSkipDuringMethodDispatchParser {
 pub(crate) struct RustcParenSugarParser;
 impl NoArgsAttributeParser for RustcParenSugarParser {
     const PATH: &[Symbol] = &[sym::rustc_paren_sugar];
-    const ALLOWED_TARGETS: AllowedTargets = AllowedTargets::AllowList(&[Allow(Target::Trait)]);
-    const STABILITY: AttributeStability = unstable!(rustc_attrs);
+    const ALLOWED_TARGETS: AllowedTargets<'_> = AllowedTargets::AllowList(&[Allow(Target::Trait)]);
+    const STABILITY: AttributeStability = unstable!(unboxed_closures);
     const CREATE: fn(Span) -> AttributeKind = |_| AttributeKind::RustcParenSugar;
 }
 
@@ -62,7 +63,7 @@ impl NoArgsAttributeParser for RustcParenSugarParser {
 pub(crate) struct MarkerParser;
 impl NoArgsAttributeParser for MarkerParser {
     const PATH: &[Symbol] = &[sym::marker];
-    const ALLOWED_TARGETS: AllowedTargets = AllowedTargets::AllowList(&[
+    const ALLOWED_TARGETS: AllowedTargets<'_> = AllowedTargets::AllowList(&[
         Allow(Target::Trait),
         Warn(Target::Field),
         Warn(Target::Arm),
@@ -75,7 +76,7 @@ impl NoArgsAttributeParser for MarkerParser {
 pub(crate) struct RustcDenyExplicitImplParser;
 impl NoArgsAttributeParser for RustcDenyExplicitImplParser {
     const PATH: &[Symbol] = &[sym::rustc_deny_explicit_impl];
-    const ALLOWED_TARGETS: AllowedTargets = AllowedTargets::AllowList(&[Allow(Target::Trait)]);
+    const ALLOWED_TARGETS: AllowedTargets<'_> = AllowedTargets::AllowList(&[Allow(Target::Trait)]);
     const STABILITY: AttributeStability = unstable!(rustc_attrs);
     const CREATE: fn(Span) -> AttributeKind = |_| AttributeKind::RustcDenyExplicitImpl;
 }
@@ -83,7 +84,7 @@ impl NoArgsAttributeParser for RustcDenyExplicitImplParser {
 pub(crate) struct RustcDynIncompatibleTraitParser;
 impl NoArgsAttributeParser for RustcDynIncompatibleTraitParser {
     const PATH: &[Symbol] = &[sym::rustc_dyn_incompatible_trait];
-    const ALLOWED_TARGETS: AllowedTargets = AllowedTargets::AllowList(&[Allow(Target::Trait)]);
+    const ALLOWED_TARGETS: AllowedTargets<'_> = AllowedTargets::AllowList(&[Allow(Target::Trait)]);
     const STABILITY: AttributeStability = unstable!(rustc_attrs);
     const CREATE: fn(Span) -> AttributeKind = AttributeKind::RustcDynIncompatibleTrait;
 }
@@ -93,17 +94,23 @@ impl NoArgsAttributeParser for RustcDynIncompatibleTraitParser {
 pub(crate) struct RustcSpecializationTraitParser;
 impl NoArgsAttributeParser for RustcSpecializationTraitParser {
     const PATH: &[Symbol] = &[sym::rustc_specialization_trait];
-    const ALLOWED_TARGETS: AllowedTargets = AllowedTargets::AllowList(&[Allow(Target::Trait)]);
+    const ALLOWED_TARGETS: AllowedTargets<'_> = AllowedTargets::AllowList(&[Allow(Target::Trait)]);
     const STABILITY: AttributeStability = unstable!(rustc_attrs);
     const CREATE: fn(Span) -> AttributeKind = |_| AttributeKind::RustcSpecializationTrait;
 }
 
-pub(crate) struct RustcUnsafeSpecializationMarkerParser;
-impl NoArgsAttributeParser for RustcUnsafeSpecializationMarkerParser {
-    const PATH: &[Symbol] = &[sym::rustc_unsafe_specialization_marker];
-    const ALLOWED_TARGETS: AllowedTargets = AllowedTargets::AllowList(&[Allow(Target::Trait)]);
+pub(crate) struct RustcAllowLifetimeDependentSpecializationParser;
+impl NoArgsAttributeParser for RustcAllowLifetimeDependentSpecializationParser {
+    const PATH: &[Symbol] = &[sym::rustc_allow_lifetime_dependent_specialization];
+    const ALLOWED_TARGETS: AllowedTargets<'_> = AllowedTargets::AllowList(&[Allow(Target::Trait)]);
     const STABILITY: AttributeStability = unstable!(rustc_attrs);
-    const CREATE: fn(Span) -> AttributeKind = |_| AttributeKind::RustcUnsafeSpecializationMarker;
+    const CREATE: fn(Span) -> AttributeKind =
+        |_| AttributeKind::RustcAllowLifetimeDependentSpecialization;
+    const SAFETY: AttributeSafety = AttributeSafety::Unsafe {
+        note: "this attribute requires `unsafe` because lifetime constraints from \
+            the implementations of the trait are not considered when specializing",
+        unsafe_since: None,
+    };
 }
 
 // Coherence
@@ -111,7 +118,7 @@ impl NoArgsAttributeParser for RustcUnsafeSpecializationMarkerParser {
 pub(crate) struct RustcCoinductiveParser;
 impl NoArgsAttributeParser for RustcCoinductiveParser {
     const PATH: &[Symbol] = &[sym::rustc_coinductive];
-    const ALLOWED_TARGETS: AllowedTargets = AllowedTargets::AllowList(&[Allow(Target::Trait)]);
+    const ALLOWED_TARGETS: AllowedTargets<'_> = AllowedTargets::AllowList(&[Allow(Target::Trait)]);
     const STABILITY: AttributeStability = unstable!(rustc_attrs);
     const CREATE: fn(Span) -> AttributeKind = |_| AttributeKind::RustcCoinductive;
 }
@@ -119,7 +126,7 @@ impl NoArgsAttributeParser for RustcCoinductiveParser {
 pub(crate) struct RustcAllowIncoherentImplParser;
 impl NoArgsAttributeParser for RustcAllowIncoherentImplParser {
     const PATH: &[Symbol] = &[sym::rustc_allow_incoherent_impl];
-    const ALLOWED_TARGETS: AllowedTargets =
+    const ALLOWED_TARGETS: AllowedTargets<'_> =
         AllowedTargets::AllowList(&[Allow(Target::Method(MethodKind::Inherent))]);
     const STABILITY: AttributeStability = unstable!(rustc_attrs);
     const CREATE: fn(Span) -> AttributeKind = AttributeKind::RustcAllowIncoherentImpl;
@@ -128,7 +135,7 @@ impl NoArgsAttributeParser for RustcAllowIncoherentImplParser {
 pub(crate) struct FundamentalParser;
 impl NoArgsAttributeParser for FundamentalParser {
     const PATH: &[Symbol] = &[sym::fundamental];
-    const ALLOWED_TARGETS: AllowedTargets =
+    const ALLOWED_TARGETS: AllowedTargets<'_> =
         AllowedTargets::AllowList(&[Allow(Target::Struct), Allow(Target::Trait)]);
     const STABILITY: AttributeStability = unstable!(fundamental);
     const CREATE: fn(Span) -> AttributeKind = |_| AttributeKind::Fundamental;

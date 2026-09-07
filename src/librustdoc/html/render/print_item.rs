@@ -1,5 +1,8 @@
+use std::borrow::Cow;
 use std::cmp::Ordering;
+use std::collections::hash_map::DefaultHasher;
 use std::fmt::{self, Display, Write as _};
+use std::hash::{Hash, Hasher};
 use std::iter;
 
 use askama::Template;
@@ -32,12 +35,12 @@ use crate::formats::item_type::ItemType;
 use crate::html::escape::{Escape, EscapeBodyTextWithWbr};
 use crate::html::format::{
     Ending, PrintWithSpace, full_print_fn_decl, print_abi_with_space, print_constness_with_space,
-    print_generic_bound, print_generics, print_impl, print_import, print_type, print_where_clause,
-    visibility_print_with_space,
+    print_generic_bound, print_generics, print_impl, print_import, print_path, print_type,
+    print_where_clause, visibility_print_with_space,
 };
 use crate::html::markdown::{HeadingOffset, MarkdownSummaryLine};
 use crate::html::render::sidebar::filters;
-use crate::html::render::{document_full, document_item_info};
+use crate::html::render::{document_full, document_item_info, notable_trait_badges};
 use crate::html::url_parts_builder::UrlPartsBuilder;
 
 const ITEM_TABLE_OPEN: &str = "<dl class=\"item-table\">";
@@ -50,6 +53,15 @@ struct PathComponent {
     name: Symbol,
 }
 
+struct NotableTraitBadgeVars {
+    name: String,
+    full_path: String,
+    /// Relative URL to the trait page, or `None` when not linkable.
+    href: Option<String>,
+    /// Index of the `.notable-trait-badge-{n}` color class.
+    color_index: u8,
+}
+
 #[derive(Template)]
 #[template(path = "print_item.html")]
 struct ItemVars<'a> {
@@ -58,6 +70,7 @@ struct ItemVars<'a> {
     item_type: &'a str,
     path_components: Vec<PathComponent>,
     stability_since_raw: &'a str,
+    notable_trait_badges: Vec<NotableTraitBadgeVars>,
     src_href: Option<&'a str>,
 }
 
@@ -111,6 +124,25 @@ pub(super) fn print_item(cx: &Context<'_>, item: &clean::Item) -> impl fmt::Disp
         let src_href =
             if cx.info.include_sources && !item.is_primitive() { cx.src_href(item) } else { None };
 
+        let notable_trait_badges: Vec<NotableTraitBadgeVars> = notable_trait_badges(item, cx)
+            .into_iter()
+            .map(|info| {
+                // Stable per-trait color from a hash of the trait path so the
+                // same trait gets the same badge color across pages.
+                // This won't be stable between releases though.
+                let mut h = DefaultHasher::new();
+                info.full_path.hash(&mut h);
+                const BADGE_COLORS: u8 = 6;
+                let color_index = (h.finish() as u8) % BADGE_COLORS;
+                NotableTraitBadgeVars {
+                    name: info.name,
+                    full_path: info.full_path,
+                    href: info.href,
+                    color_index,
+                }
+            })
+            .collect();
+
         let path_components = if item.is_fake_item() {
             vec![]
         } else {
@@ -134,6 +166,7 @@ pub(super) fn print_item(cx: &Context<'_>, item: &clean::Item) -> impl fmt::Disp
             item_type: &item.type_().to_string(),
             path_components,
             stability_since_raw: &stability_since_raw,
+            notable_trait_badges,
             src_href: src_href.as_deref(),
         };
 
@@ -395,25 +428,26 @@ fn item_module(cx: &Context<'_>, item: &clean::Item, items: &[clean::Item]) -> i
                         let (stab_tags, deprecation) = match import.source.did {
                             Some(import_def_id) => {
                                 let stab_tags =
-                                    print_extra_info_tags(tcx, myitem, item, Some(import_def_id))
-                                        .to_string();
+                                    print_extra_info_tags(tcx, myitem, item, Some(import_def_id));
                                 let deprecation = tcx
                                     .lookup_deprecation(import_def_id)
                                     .is_some_and(|deprecation| deprecation.is_in_effect());
-                                (stab_tags, deprecation)
+                                (Some(stab_tags), deprecation)
                             }
-                            None => (String::new(), item.is_deprecated(tcx)),
+                            None => (None, item.is_deprecated(tcx)),
                         };
                         let visibility_and_hidden = visibility_and_hidden(myitem);
                         let id = match import.kind {
-                            clean::ImportKind::Simple(s) => {
-                                format!(" id=\"{}\"", cx.derive_id(format!("reexport.{s}")))
-                            }
-                            clean::ImportKind::Glob => String::new(),
+                            clean::ImportKind::Simple(s) => Some(format_args!(
+                                " id=\"{}\"",
+                                cx.derive_id(format!("reexport.{s}"))
+                            )),
+                            clean::ImportKind::Glob => None,
                         };
                         write!(
                             w,
                             "<dt{id}{deprecation_attr}><code>",
+                            id = id.maybe_display(),
                             deprecation_attr = deprecation_class_attr(deprecation)
                         )?;
                         write!(
@@ -423,6 +457,7 @@ fn item_module(cx: &Context<'_>, item: &clean::Item, items: &[clean::Item]) -> i
                             vis = visibility_print_with_space(myitem, cx),
                             imp = print_import(import, cx),
                             visibility_and_hidden = visibility_and_hidden,
+                            stab_tags = stab_tags.maybe_display(),
                         )?;
                     }
                     _ => {
@@ -512,18 +547,14 @@ fn print_extra_info_tags(
             write!(f, "{}", tag_html("unstable", "", "Experimental"))?;
         }
 
+        debug!(name = ?item.name, cfg = ?item.cfg, parent_cfg = ?parent.cfg, "Portability");
+
         let cfg = match (&item.cfg, parent.cfg.as_ref()) {
-            (Some(cfg), Some(parent_cfg)) => cfg.simplify_with(parent_cfg),
-            (cfg, _) => cfg.as_deref().cloned(),
+            (Some(cfg), Some(parent_cfg)) => cfg.simplify_with(parent_cfg).map(Cow::Owned),
+            (cfg, _) => cfg.as_deref().map(Cow::Borrowed),
         };
 
-        debug!(
-            "Portability name={name:?} {cfg:?} - {parent_cfg:?} = {cfg:?}",
-            name = item.name,
-            cfg = item.cfg,
-            parent_cfg = parent.cfg
-        );
-        if let Some(ref cfg) = cfg {
+        if let Some(cfg) = cfg {
             write!(
                 f,
                 "{}",
@@ -783,17 +814,12 @@ fn item_trait(cx: &Context<'_>, it: &clean::Item, t: &clean::Trait) -> impl fmt:
             }
         })?;
 
-        // Trait documentation
-        write!(w, "{}", document(cx, it, None, HeadingOffset::H2))?;
-
-        if let rustc_middle::ty::trait_def::ImplRestrictionKind::Restricted(def_id, _) =
-            impl_restriction
-        {
+        if let rustc_middle::ty::RestrictionKind::Restricted(def_id, _) = impl_restriction {
             let v1;
             let v2;
             write!(
                 w,
-                "<div class=\"stab impl_restriction\">This trait cannot be implemented outside <code>{}</code>.</div>",
+                "<div class=\"impl-restriction\">ⓘ <i>This trait cannot be implemented outside <code>{}</code>.</i></div>",
                 if cx.cache().document_private {
                     v1 =
                         rustc_middle::ty::print::with_resolve_crate_name!(tcx.def_path_str(def_id));
@@ -804,6 +830,9 @@ fn item_trait(cx: &Context<'_>, it: &clean::Item, t: &clean::Trait) -> impl fmt:
                 },
             )?;
         }
+
+        // Trait documentation
+        write!(w, "{}", document(cx, it, None, HeadingOffset::H2))?;
 
         fn trait_item(cx: &Context<'_>, m: &clean::Item, t: &clean::Item) -> impl fmt::Display {
             fmt::from_fn(|w| {
@@ -976,7 +1005,7 @@ fn item_trait(cx: &Context<'_>, it: &clean::Item, t: &clean::Trait) -> impl fmt:
                 "Dyn Compatibility",
                 "dyn-compatibility",
                 None,
-                format!(
+                format_args!(
                     "<div class=\"dyn-compatibility-info\"><p>This trait {} \
                     <a href=\"{base}/reference/items/traits.html#dyn-compatibility\">dyn compatible</a>.</p>\
                     <p><i>In older versions of Rust, dyn compatibility was called \"object safety\".</i></p></div>",
@@ -1016,9 +1045,9 @@ fn item_trait(cx: &Context<'_>, it: &clean::Item, t: &clean::Trait) -> impl fmt:
             let (mut synthetic, mut concrete): (Vec<&&Impl>, Vec<&&Impl>) =
                 local.iter().partition(|i| i.inner_impl().kind.is_auto());
 
-            synthetic.sort_by_cached_key(|i| ImplString::new(i, cx));
-            concrete.sort_by_cached_key(|i| ImplString::new(i, cx));
-            foreign.sort_by_cached_key(|i| ImplString::new(i, cx));
+            synthetic.sort_by_cached_key(|i| ImplString::new_impl(i, cx));
+            concrete.sort_by_cached_key(|i| ImplString::new_impl(i, cx));
+            foreign.sort_by_cached_key(|i| ImplString::new_impl(i, cx));
 
             if !foreign.is_empty() {
                 write!(
@@ -1775,10 +1804,10 @@ fn item_variants(
             w,
             "{}",
             write_section_heading(
-                &format!("Variants{}", document_non_exhaustive_header(it)),
+                format_args!("Variants{}", document_non_exhaustive_header(it)),
                 "variants",
                 Some("variants"),
-                format!("{}<div class=\"variants\">", document_non_exhaustive(it)),
+                format_args!("{}<div class=\"variants\">", document_non_exhaustive(it)),
             ),
         )?;
 
@@ -1969,7 +1998,7 @@ fn item_primitive(cx: &Context<'_>, it: &clean::Item) -> impl fmt::Display {
             let (concrete, synthetic, blanket_impl) =
                 get_filtered_impls_for_reference(&cx.shared, it);
 
-            render_all_impls(w, cx, it, &concrete, &synthetic, &blanket_impl)
+            render_all_impls(w, cx, it, concrete, synthetic, blanket_impl)
         }
     })
 }
@@ -2105,7 +2134,7 @@ fn item_fields(
         if let None | Some(CtorKind::Fn) = ctor_kind
             && fields.peek().is_some()
         {
-            let title = format!(
+            let title = format_args!(
                 "{}{}",
                 if ctor_kind.is_none() { "Fields" } else { "Tuple Fields" },
                 document_non_exhaustive_header(it),
@@ -2113,12 +2142,7 @@ fn item_fields(
             write!(
                 w,
                 "{}",
-                write_section_heading(
-                    &title,
-                    "fields",
-                    Some("fields"),
-                    document_non_exhaustive(it)
-                )
+                write_section_heading(title, "fields", Some("fields"), document_non_exhaustive(it))
             )?;
             for (index, (field, ty)) in fields.enumerate() {
                 let field_name =
@@ -2346,16 +2370,21 @@ where
 }
 
 #[derive(PartialEq, Eq)]
-struct ImplString {
+pub(super) struct ImplString {
     // Plain text (not HTML text) because this is only used for sorting purposes, and the plain
     // text is much shorter and thus faster to compare.
     cmp_text: String,
 }
 
 impl ImplString {
-    fn new(i: &Impl, cx: &Context<'_>) -> ImplString {
+    fn new_impl(i: &Impl, cx: &Context<'_>) -> Self {
         let impl_ = i.inner_impl();
-        ImplString { cmp_text: format!("{:#}", print_impl(impl_, false, cx)) }
+        Self { cmp_text: format!("{:#}", print_impl(impl_, false, cx)) }
+    }
+
+    pub(super) fn new_path(i: &Impl, cx: &Context<'_>) -> Option<Self> {
+        let path = i.inner_impl().trait_.as_ref()?;
+        Some(Self { cmp_text: format!("{:#}", print_path(path, cx)) })
     }
 }
 
@@ -2549,7 +2578,7 @@ fn render_struct_fields(
                 }
                 for field in fields {
                     if let clean::StructFieldItem(ref ty) = field.kind {
-                        render_attributes_in_code(w, field, &format!("{tab}    "), cx)?;
+                        render_attributes_in_code(w, field, format_args!("{tab}    "), cx)?;
                         writeln!(
                             w,
                             "{tab}    {vis}{name}: {ty},",

@@ -20,6 +20,7 @@
 #![feature(const_alloc_error)]
 #![feature(const_cmp)]
 #![feature(const_convert)]
+#![feature(const_default)]
 #![feature(const_destruct)]
 #![feature(const_heap)]
 #![feature(const_option_ops)]
@@ -27,6 +28,7 @@
 #![feature(const_try)]
 #![feature(copied_into_inner)]
 #![feature(core_intrinsics)]
+#![feature(drop_guard)]
 #![feature(exact_size_is_empty)]
 #![feature(extend_one)]
 #![feature(extend_one_unchecked)]
@@ -51,6 +53,7 @@
 #![feature(trusted_random_access)]
 #![feature(try_reserve_kind)]
 #![feature(try_trait_v2)]
+#![feature(unwrap_infallible)]
 #![feature(wtf8_internals)]
 // tidy-alphabetical-end
 //
@@ -60,7 +63,6 @@
 #![feature(const_trait_impl)]
 #![feature(dropck_eyepatch)]
 #![feature(min_specialization)]
-#![feature(never_type)]
 #![feature(optimize_attribute)]
 #![feature(prelude_import)]
 #![feature(rustc_attrs)]

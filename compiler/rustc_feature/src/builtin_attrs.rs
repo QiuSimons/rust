@@ -2,9 +2,7 @@
 
 use std::sync::LazyLock;
 
-use rustc_ast::ast::Safety;
 use rustc_data_structures::fx::FxHashSet;
-use rustc_hir::AttrStyle;
 use rustc_span::{Symbol, sym};
 
 use crate::Features;
@@ -52,143 +50,27 @@ const GATED_CFGS: &[GatedCfg] = &[
         sym::cfg_target_has_reliable_f16_f128,
         Features::cfg_target_has_reliable_f16_f128,
     ),
+    (sym::target_has_threads, sym::cfg_target_has_threads, Features::cfg_target_has_threads),
     (sym::target_object_format, sym::cfg_target_object_format, Features::cfg_target_object_format),
 ];
 
-/// Find a gated cfg determined by the `pred`icate which is given the cfg's name.
-pub fn find_gated_cfg(pred: impl Fn(Symbol) -> bool) -> Option<&'static GatedCfg> {
-    GATED_CFGS.iter().find(|(cfg_sym, ..)| pred(*cfg_sym))
+/// Find a gated cfg matching `name`.
+pub fn find_gated_cfg(name: Symbol) -> Option<&'static GatedCfg> {
+    GATED_CFGS.iter().find(|(cfg_sym, ..)| name == *cfg_sym)
 }
 
 #[derive(Clone, Debug, Copy)]
 pub enum AttributeStability {
-    /// An attribute that is unstable behind a specified feature fagte
+    /// An attribute that is unstable behind a specified feature gate.
     Unstable {
         /// The feature gate, for example `rustc_attrs` for rustc_* attributes.
         gate_name: Symbol,
-        /// Check function to be called during the `PostExpansionVisitor` pass, which will be one of the `Features::*` functions
-        gate_check: fn(&Features) -> bool,
-        /// Notes to be displayed when an attempt is made to use the attribute without its feature gate.
+        /// Notes to be displayed when an attempt is made to use the attribute without its feature
+        /// gate.
         notes: &'static [&'static str],
     },
     /// A stable attribute, can be used on all release channels
     Stable,
-}
-
-// FIXME(jdonszelmann): move to rustc_hir::attrs
-/// A template that the attribute input must match.
-/// Only top-level shape (`#[attr]` vs `#[attr(...)]` vs `#[attr = ...]`) is considered now.
-#[derive(Clone, Copy, Default)]
-pub struct AttributeTemplate {
-    /// If `true`, the attribute is allowed to be a bare word like `#[test]`.
-    pub word: bool,
-    /// If `Some`, the attribute is allowed to take a list of items like `#[allow(..)]`.
-    pub list: Option<&'static [&'static str]>,
-    /// If non-empty, the attribute is allowed to take a list containing exactly
-    /// one of the listed words, like `#[coverage(off)]`.
-    pub one_of: &'static [Symbol],
-    /// If `Some`, the attribute is allowed to be a name/value pair where the
-    /// value is a string, like `#[must_use = "reason"]`.
-    pub name_value_str: Option<&'static [&'static str]>,
-    /// A link to the document for this attribute.
-    pub docs: Option<&'static str>,
-}
-
-pub enum AttrSuggestionStyle {
-    /// The suggestion is styled for a normal attribute.
-    /// The `AttrStyle` determines whether this is an inner or outer attribute.
-    Attribute(AttrStyle),
-    /// The suggestion is styled for an attribute embedded into another attribute.
-    /// For example, attributes inside `#[cfg_attr(true, attr(...)]`.
-    EmbeddedAttribute,
-    /// The suggestion is styled for macros that are parsed with attribute parsers.
-    /// For example, the `cfg!(predicate)` macro.
-    Macro,
-}
-
-impl AttributeTemplate {
-    pub fn suggestions(
-        &self,
-        style: AttrSuggestionStyle,
-        safety: Safety,
-        name: impl std::fmt::Display,
-    ) -> Vec<String> {
-        let (start, macro_call, end) = match style {
-            AttrSuggestionStyle::Attribute(AttrStyle::Outer) => ("#[", "", "]"),
-            AttrSuggestionStyle::Attribute(AttrStyle::Inner) => ("#![", "", "]"),
-            AttrSuggestionStyle::Macro => ("", "!", ""),
-            AttrSuggestionStyle::EmbeddedAttribute => ("", "", ""),
-        };
-
-        let mut suggestions = vec![];
-
-        let (safety_start, safety_end) = match safety {
-            Safety::Unsafe(_) => ("unsafe(", ")"),
-            _ => ("", ""),
-        };
-
-        if self.word {
-            debug_assert!(macro_call.is_empty(), "Macro suggestions use list style");
-            suggestions.push(format!("{start}{safety_start}{name}{safety_end}{end}"));
-        }
-        if let Some(descr) = self.list {
-            for descr in descr {
-                suggestions.push(format!(
-                    "{start}{safety_start}{name}{macro_call}({descr}){safety_end}{end}"
-                ));
-            }
-        }
-        suggestions.extend(
-            self.one_of
-                .iter()
-                .map(|&word| format!("{start}{safety_start}{name}({word}){safety_end}{end}")),
-        );
-        if let Some(descr) = self.name_value_str {
-            debug_assert!(macro_call.is_empty(), "Macro suggestions use list style");
-            for descr in descr {
-                suggestions
-                    .push(format!("{start}{safety_start}{name} = \"{descr}\"{safety_end}{end}"));
-            }
-        }
-        suggestions.sort();
-
-        suggestions
-    }
-}
-
-/// A convenience macro for constructing attribute templates.
-/// E.g., `template!(Word, List: "description")` means that the attribute
-/// supports forms `#[attr]` and `#[attr(description)]`.
-#[macro_export]
-macro_rules! template {
-    (Word) => { $crate::template!(@ true, None, &[], None, None) };
-    (Word, $link: literal) => { $crate::template!(@ true, None, &[], None, Some($link)) };
-    (List: $descr: expr) => { $crate::template!(@ false, Some($descr), &[], None, None) };
-    (List: $descr: expr, $link: literal) => { $crate::template!(@ false, Some($descr), &[], None, Some($link)) };
-    (OneOf: $one_of: expr) => { $crate::template!(@ false, None, $one_of, None, None) };
-    (NameValueStr: [$($descr: literal),* $(,)?]) => { $crate::template!(@ false, None, &[], Some(&[$($descr,)*]), None) };
-    (NameValueStr: [$($descr: literal),* $(,)?], $link: literal) => { $crate::template!(@ false, None, &[], Some(&[$($descr,)*]), Some($link)) };
-    (NameValueStr: $descr: literal) => { $crate::template!(@ false, None, &[], Some(&[$descr]), None) };
-    (NameValueStr: $descr: literal, $link: literal) => { $crate::template!(@ false, None, &[], Some(&[$descr]), Some($link)) };
-    (Word, List: $descr: expr) => { $crate::template!(@ true, Some($descr), &[], None, None) };
-    (Word, List: $descr: expr, $link: literal) => { $crate::template!(@ true, Some($descr), &[], None, Some($link)) };
-    (Word, NameValueStr: $descr: expr) => { $crate::template!(@ true, None, &[], Some(&[$descr]), None) };
-    (Word, NameValueStr: $descr: expr, $link: literal) => { $crate::template!(@ true, None, &[], Some(&[$descr]), Some($link)) };
-    (List: $descr1: expr, NameValueStr: $descr2: expr) => {
-        $crate::template!(@ false, Some($descr1), &[], Some(&[$descr2]), None)
-    };
-    (List: $descr1: expr, NameValueStr: $descr2: expr, $link: literal) => {
-        $crate::template!(@ false, Some($descr1), &[], Some(&[$descr2]), Some($link))
-    };
-    (Word, List: $descr1: expr, NameValueStr: $descr2: expr) => {
-        $crate::template!(@ true, Some($descr1), &[], Some(&[$descr2]), None)
-    };
-    (Word, List: $descr1: expr, NameValueStr: $descr2: expr, $link: literal) => {
-        $crate::template!(@ true, Some($descr1), &[], Some(&[$descr2]), Some($link))
-    };
-    (@ $word: expr, $list: expr, $one_of: expr, $name_value_str: expr, $link: expr) => { $crate::AttributeTemplate {
-        word: $word, list: $list, one_of: $one_of, name_value_str: $name_value_str, docs: $link,
-    } };
 }
 
 /// Attributes that have a special meaning to rustc or rustdoc.
@@ -302,6 +184,8 @@ pub static BUILTIN_ATTRIBUTES: &[Symbol] = &[
 
     sym::ffi_pure,
     sym::ffi_const,
+    sym::register_attribute_tool,
+    sym::register_lint_tool,
     sym::register_tool,
     // `#[cfi_encoding = ""]`
     sym::cfi_encoding,
@@ -326,6 +210,25 @@ pub static BUILTIN_ATTRIBUTES: &[Symbol] = &[
     // - https://github.com/rust-lang/rust/issues/130494
     sym::pin_v2,
 
+    // The `#[rustc_splat]` attribute is part of the `splat` experiment
+    // that improves the ergonomics of function overloading, tracked in:
+    //
+    // - https://github.com/rust-lang/rust/issues/153629
+    sym::rustc_splat,
+
+    // The `#[rustc_unroll]` attribute.
+    //
+    // - https://github.com/rust-lang/rust/pull/156816
+    //
+    // FIXME(#159429): temporarily renamed to mitigate `#[unroll]` nameres ambiguity
+    sym::rustc_unroll,
+
+    // `#[instrument_fn = "on|off"]` to insert or inhibit instrumentation function
+    // calls inside a function, usually around the prologue.
+    //
+    // - https://github.com/rust-lang/rust/issues/157081
+    sym::instrument_fn,
+
     // ==========================================================================
     // Internal attributes: Stability, deprecation, and unsafe:
     // ==========================================================================
@@ -346,15 +249,12 @@ pub static BUILTIN_ATTRIBUTES: &[Symbol] = &[
     sym::rustc_deprecated_safe_2024,
     sym::rustc_pub_transparent,
 
-
     // ==========================================================================
     // Internal attributes: Type system related:
     // ==========================================================================
 
     sym::fundamental,
     sym::may_dangle,
-
-    sym::rustc_never_type_options,
 
     // ==========================================================================
     // Internal attributes: Runtime related:
@@ -391,12 +291,6 @@ pub static BUILTIN_ATTRIBUTES: &[Symbol] = &[
     sym::rustc_macro_transparency,
     sym::rustc_autodiff,
     sym::rustc_offload_kernel,
-    // Traces that are left when `cfg` and `cfg_attr` attributes are expanded.
-    // The attributes are not gated, to avoid stability errors, but they cannot be used in stable
-    // or unstable code directly because `sym::cfg_(attr_)trace` are not valid identifiers, they
-    // can only be generated by the compiler.
-    sym::cfg_trace,
-    sym::cfg_attr_trace,
 
     // ==========================================================================
     // Internal attributes, Diagnostics related:
@@ -421,6 +315,7 @@ pub static BUILTIN_ATTRIBUTES: &[Symbol] = &[
     // Used by the `rustc::bad_opt_access` lint on fields
     // types (as well as any others in future).
     sym::rustc_lint_opt_deny_field_access,
+    sym::rustc_diagnostic_opaque,
 
     // ==========================================================================
     // Internal attributes, Const related:
@@ -452,20 +347,22 @@ pub static BUILTIN_ATTRIBUTES: &[Symbol] = &[
     sym::rustc_no_implicit_autorefs,
     sym::rustc_coherence_is_core,
     sym::rustc_coinductive,
+    sym::rustc_comptime,
     sym::rustc_allow_incoherent_impl,
     sym::rustc_preserve_ub_checks,
     sym::rustc_deny_explicit_impl,
     sym::rustc_dyn_incompatible_trait,
     sym::rustc_has_incoherent_inherent_impls,
     sym::rustc_non_const_trait_method,
+    sym::rustc_panics_when_zero,
 
+    sym::rustc_canonical_symbol,
     sym::rustc_diagnostic_item,
     sym::prelude_import,
     sym::rustc_paren_sugar,
     sym::rustc_inherit_overflow_checks,
-    sym::rustc_reservation_impl,
     sym::rustc_test_marker,
-    sym::rustc_unsafe_specialization_marker,
+    sym::rustc_allow_lifetime_dependent_specialization,
     sym::rustc_specialization_trait,
     sym::rustc_main,
     sym::rustc_skip_during_method_dispatch,
@@ -490,6 +387,7 @@ pub static BUILTIN_ATTRIBUTES: &[Symbol] = &[
     sym::rustc_strict_coherence,
     sym::rustc_dump_variances,
     sym::rustc_dump_variances_of_opaques,
+    sym::rustc_dump_generics,
     sym::rustc_dump_hidden_type_of_opaques,
     sym::rustc_dump_layout,
     sym::rustc_abi,
@@ -508,7 +406,7 @@ pub static BUILTIN_ATTRIBUTES: &[Symbol] = &[
     sym::rustc_mir,
     sym::custom_mir,
     sym::rustc_dump_item_bounds,
-    sym::rustc_dump_predicates,
+    sym::rustc_dump_clauses,
     sym::rustc_dump_def_parents,
     sym::rustc_dump_object_lifetime_defaults,
     sym::rustc_dump_vtable,
@@ -517,15 +415,15 @@ pub static BUILTIN_ATTRIBUTES: &[Symbol] = &[
 ];
 
 pub fn is_builtin_attr_name(name: Symbol) -> bool {
-    BUILTIN_ATTRIBUTE_MAP.get(&name).is_some()
+    BUILTIN_ATTRIBUTE_SET.contains(&name)
 }
 
-pub static BUILTIN_ATTRIBUTE_MAP: LazyLock<FxHashSet<Symbol>> = LazyLock::new(|| {
-    let mut map = FxHashSet::default();
+pub static BUILTIN_ATTRIBUTE_SET: LazyLock<FxHashSet<Symbol>> = LazyLock::new(|| {
+    let mut set = FxHashSet::default();
     for attr in BUILTIN_ATTRIBUTES.iter() {
-        if !map.insert(*attr) {
+        if !set.insert(*attr) {
             panic!("duplicate builtin attribute `{}`", attr);
         }
     }
-    map
+    set
 });

@@ -15,7 +15,10 @@ use std::sync::Arc;
 
 use rustc_abi::{FieldIdx, Integer, Size, VariantIdx};
 use rustc_ast::{AsmMacro, InlineAsmOptions, InlineAsmTemplatePiece, Mutability};
+use rustc_data_structures::fx::FxIndexMap;
+use rustc_data_structures::thin_vec::ThinVec;
 use rustc_hir as hir;
+use rustc_hir::attrs::AttributeKind;
 use rustc_hir::def_id::DefId;
 use rustc_hir::{BindingMode, ByRef, HirId, MatchSource, RangeEnd};
 use rustc_index::{IndexVec, newtype_index};
@@ -59,6 +62,7 @@ macro_rules! thir_with_elements {
         #[derive(Debug, StableHash, Clone)]
         pub struct Thir<'tcx> {
             pub body_type: BodyTy<'tcx>,
+            pub attributes: FxIndexMap<ExprId, ThinVec<AttributeKind>>,
             $(
                 pub $name: IndexVec<$id, $value>,
             )*
@@ -68,6 +72,7 @@ macro_rules! thir_with_elements {
             pub fn new(body_type: BodyTy<'tcx>) -> Thir<'tcx> {
                 Thir {
                     body_type,
+                    attributes: FxIndexMap::default(),
                     $(
                         $name: IndexVec::new(),
                     )*
@@ -252,6 +257,9 @@ pub struct Expr<'tcx> {
 
     /// The id of the HIR expression whose [temporary scope] should be used for this expression.
     ///
+    /// Also used by coverage instrumentation to recover the HIR node that corresponds to a THIR
+    /// expression node.
+    ///
     /// [temporary scope]: https://doc.rust-lang.org/reference/destructors.html#temporary-scopes
     pub temp_scope_id: hir::ItemLocalId,
 
@@ -339,7 +347,7 @@ pub enum ExprKind<'tcx> {
     /// expression. This is inserted in some places where an operation would
     /// otherwise be erased completely (e.g. some no-op casts), but we still
     /// need to ensure that its operand is treated as a value and not a place.
-    Use {
+    ValueExpr {
         source: ExprId,
     },
     /// A coercion from `!` to any type.
@@ -812,8 +820,6 @@ pub enum PatKind<'tcx> {
 
     /// Explicit or implicit `deref!(..)` pattern, under `feature(deref_patterns)`.
     /// Represents a call to `Deref` or `DerefMut`, or a deref-move of `Box`.
-    ///
-    /// `box P` patterns also lower to this, under `feature(box_patterns)`.
     DerefPattern {
         subpattern: Box<Pat<'tcx>>,
         /// Whether the pattern scrutinee needs to be borrowed in order to call `Deref::deref` or

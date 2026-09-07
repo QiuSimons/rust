@@ -3,7 +3,6 @@
 //! `normalize_canonicalized_projection` query when it encounters projections.
 
 use rustc_data_structures::sso::SsoHashMap;
-use rustc_data_structures::stack::ensure_sufficient_stack;
 use rustc_infer::traits::PredicateObligations;
 use rustc_macros::extension;
 pub use rustc_middle::traits::query::NormalizationResult;
@@ -203,7 +202,7 @@ impl<'a, 'tcx> FallibleTypeFolder<TyCtxt<'tcx>> for QueryNormalizer<'a, 'tcx> {
             return Ok(*ty);
         }
 
-        let &ty::Alias(data) = ty.kind() else {
+        let &ty::Alias(_, data) = ty.kind() else {
             let res = ty.try_super_fold_with(self)?;
             self.cache.insert(ty, res);
             return Ok(res);
@@ -216,11 +215,11 @@ impl<'a, 'tcx> FallibleTypeFolder<TyCtxt<'tcx>> for QueryNormalizer<'a, 'tcx> {
                 // Only normalize `impl Trait` outside of type inference, usually in codegen.
                 match self.infcx.typing_mode_raw().assert_not_erased() {
                     TypingMode::Coherence
-                    | TypingMode::Analysis { .. }
-                    | TypingMode::Borrowck { .. }
-                    | TypingMode::PostBorrowckAnalysis { .. } => ty.try_super_fold_with(self)?,
+                    | TypingMode::Typeck { .. }
+                    | TypingMode::PostTypeckUntilBorrowck { .. }
+                    | TypingMode::PostBorrowck { .. } => ty.try_super_fold_with(self)?,
 
-                    TypingMode::PostAnalysis | TypingMode::Codegen => {
+                    TypingMode::Reflection | TypingMode::PostAnalysis | TypingMode::Codegen => {
                         let args = data.args.try_fold_with(self)?;
                         let recursion_limit = self.cx().recursion_limit();
 
@@ -248,7 +247,7 @@ impl<'a, 'tcx> FallibleTypeFolder<TyCtxt<'tcx>> for QueryNormalizer<'a, 'tcx> {
                                 "recursive opaque type",
                             );
                         }
-                        let folded_ty = ensure_sufficient_stack(|| self.try_fold_ty(concrete_ty));
+                        let folded_ty = self.try_fold_ty(concrete_ty);
                         self.anon_depth -= 1;
                         folded_ty?
                     }
@@ -272,21 +271,19 @@ impl<'a, 'tcx> FallibleTypeFolder<TyCtxt<'tcx>> for QueryNormalizer<'a, 'tcx> {
             return Ok(constant);
         }
 
-        let uv = match constant.kind() {
-            ty::ConstKind::Unevaluated(uv) => uv,
+        let alias_const = match constant.kind() {
+            ty::ConstKind::Alias(_, alias_const) => alias_const,
             _ => return constant.try_super_fold_with(self),
         };
 
-        let constant = match uv.kind {
-            ty::UnevaluatedConstKind::Anon { .. } => {
-                crate::traits::with_replaced_escaping_bound_vars(
-                    self.infcx,
-                    &mut self.universes,
-                    constant,
-                    |constant| crate::traits::evaluate_const(&self.infcx, constant, self.param_env),
-                )
-            }
-            _ => self.try_fold_free_or_assoc(uv.into())?.expect_const(),
+        let constant = match alias_const.kind {
+            ty::AliasConstKind::Anon { .. } => crate::traits::with_replaced_escaping_bound_vars(
+                self.infcx,
+                &mut self.universes,
+                constant,
+                |constant| crate::traits::evaluate_const(&self.infcx, constant, self.param_env),
+            ),
+            _ => self.try_fold_free_or_assoc(alias_const.into())?.expect_const(),
         };
         debug!(?constant, ?self.param_env);
         constant.try_super_fold_with(self)
@@ -334,7 +331,9 @@ impl<'a, 'tcx> QueryNormalizer<'a, 'tcx> {
             ty::AliasTermKind::FreeTy { .. } | ty::AliasTermKind::FreeConst { .. } => {
                 tcx.normalize_canonicalized_free_alias(c_term)
             }
-            ty::AliasTermKind::InherentTy { .. } | ty::AliasTermKind::InherentConst { .. } => {
+            ty::AliasTermKind::InherentTy { .. }
+            | ty::AliasTermKind::InherentConstSelf { .. }
+            | ty::AliasTermKind::InherentConstImpl { .. } => {
                 tcx.normalize_canonicalized_inherent_projection(c_term)
             }
             kind @ (ty::AliasTermKind::OpaqueTy { .. } | ty::AliasTermKind::AnonConst { .. }) => {
@@ -373,12 +372,12 @@ impl<'a, 'tcx> QueryNormalizer<'a, 'tcx> {
             result.normalized_term
         };
         // `tcx.normalize_canonicalized_projection` may normalize to a type that
-        // still has unevaluated consts, so keep normalizing here if that's the case.
+        // still has alias consts, so keep normalizing here if that's the case.
         // Similarly, `tcx.normalize_canonicalized_free_alias` will only unwrap one layer
         // of type/const and we need to continue folding it to reveal the TAIT behind it
-        // or further normalize nested unevaluated consts.
-        if res != term.to_term(tcx)
-            && (res.has_type_flags(ty::TypeFlags::HAS_CT_PROJECTION)
+        // or further normalize nested alias consts.
+        if res != term.to_term(tcx, ty::IsRigid::No)
+            && (res.has_type_flags(ty::TypeFlags::HAS_CONST_ALIAS)
                 || matches!(
                     term.kind,
                     ty::AliasTermKind::FreeTy { .. } | ty::AliasTermKind::FreeConst { .. }

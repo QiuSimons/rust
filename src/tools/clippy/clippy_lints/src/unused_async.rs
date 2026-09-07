@@ -1,6 +1,6 @@
 use clippy_utils::diagnostics::{span_lint_and_then, span_lint_hir_and_then};
 use clippy_utils::is_def_id_trait_method;
-use clippy_utils::source::{HasSession, snippet_with_applicability, walk_span_to_context};
+use clippy_utils::source::{snippet_with_applicability, walk_span_to_context};
 use clippy_utils::usage::is_todo_unimplemented_stub;
 use rustc_errors::Applicability;
 use rustc_hir::def::DefKind;
@@ -9,9 +9,8 @@ use rustc_hir::{
     Body, Closure, ClosureKind, CoroutineDesugaring, CoroutineKind, Defaultness, Expr, ExprKind, FnDecl, HirId,
     ImplItem, ImplItemKind, IsAsync, Node, TraitItem, YieldSource,
 };
-use rustc_lint::{LateContext, LateLintPass};
+use rustc_lint::{LateContext, LateLintPass, impl_lint_pass};
 use rustc_middle::hir::nested_filter;
-use rustc_session::impl_lint_pass;
 use rustc_span::Span;
 use rustc_span::def_id::{LocalDefId, LocalDefIdSet};
 
@@ -154,6 +153,27 @@ impl<'tcx> Visitor<'tcx> for AsyncFnVisitor<'_, 'tcx> {
     }
 }
 
+/// Find all return value expressions (in order to replace them).
+struct ReturnValueVisitor<'tcx> {
+    exprs: Vec<&'tcx Expr<'tcx>>,
+}
+
+impl<'tcx> Visitor<'tcx> for ReturnValueVisitor<'tcx> {
+    fn visit_expr(&mut self, ex: &'tcx Expr<'tcx>) -> Self::Result {
+        match ex.kind {
+            ExprKind::Ret(expr) => {
+                if let Some(expr) = expr {
+                    self.exprs.push(expr);
+
+                    // Unlikely, but someone could potentially hide another return statement in this expression.
+                    walk_expr(self, expr);
+                }
+            },
+            _ => walk_expr(self, ex),
+        }
+    }
+}
+
 impl<'tcx> LateLintPass<'tcx> for UnusedAsync {
     fn check_fn(
         &mut self,
@@ -264,6 +284,23 @@ impl<'tcx> LateLintPass<'tcx> for UnusedAsync {
                 && let ExprKind::Block(block, _) = inner.kind
                 && let Some(tail_expr) = block.expr
             {
+                // check the impl method self type/item
+                if let Ok(args) = cx.tcx.try_normalize_erasing_regions(
+                    cx.typing_env(),
+                    cx.tcx
+                        .fn_sig(impl_item.owner_id.def_id)
+                        .instantiate_identity()
+                        .map(|x| cx.tcx.instantiate_bound_regions_with_erased(x.inputs_and_output())),
+                ) && args[..args.len() - 1].iter().any(|&x| {
+                    !x.peel_refs().is_inhabited_from(
+                        cx.tcx,
+                        cx.tcx.parent_module_from_def_id(impl_item.owner_id.def_id),
+                        cx.typing_env(),
+                    )
+                }) {
+                    return;
+                }
+
                 span_lint_and_then(
                     cx,
                     UNUSED_ASYNC_TRAIT_IMPL,
@@ -282,16 +319,28 @@ impl<'tcx> LateLintPass<'tcx> for UnusedAsync {
                             // evaluate the expression, to immediately evaluate the expression.
                             let mut app = Applicability::MaybeIncorrect;
 
-                            let async_span = cx.sess().source_map().span_extend_while_whitespace(async_span);
+                            let async_span = cx.tcx.sess.source_map().span_extend_while_whitespace(async_span);
 
                             let signature_snippet = snippet_with_applicability(cx, signature_span, "_", &mut app);
                             let tail_snippet = snippet_with_applicability(cx, tail_span, "_", &mut app).to_string();
 
-                            let sugg = vec![
+                            let mut sugg = vec![
                                 (async_span, String::new()),
                                 (signature_span, format!("impl Future<Output = {signature_snippet}>")),
                                 (tail_span, format!("{builtin_crate}::future::ready({tail_snippet})")),
                             ];
+
+                            let mut visitor = ReturnValueVisitor { exprs: vec![] };
+                            visitor.visit_block(block);
+
+                            sugg.extend(visitor.exprs.into_iter().filter_map(|expr| {
+                                walk_span_to_context(expr.span, ctxt).map(|expr_span| {
+                                    let expr_snippet =
+                                        snippet_with_applicability(cx, expr_span, "_", &mut app).to_string();
+
+                                    (expr_span, format!("{builtin_crate}::future::ready({expr_snippet})"))
+                                })
+                            }));
 
                             diag.multipart_suggestion(
                                 format!(

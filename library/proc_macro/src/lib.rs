@@ -28,6 +28,7 @@
 #![feature(rustc_attrs)]
 #![feature(extend_one)]
 #![feature(mem_conjure_zst)]
+#![feature(f16)]
 #![recursion_limit = "256"]
 #![allow(internal_features)]
 #![deny(ffi_unwind_calls)]
@@ -36,7 +37,7 @@
 #![warn(unreachable_pub)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
-#[unstable(feature = "proc_macro_internals", issue = "27812")]
+#[unstable(feature = "proc_macro_internals", issue = "none")]
 #[doc(hidden)]
 pub mod bridge;
 
@@ -46,6 +47,7 @@ mod to_tokens;
 
 use core::convert::From;
 use core::ops::BitOr;
+use std::borrow::Cow;
 use std::ffi::CStr;
 use std::ops::{Range, RangeBounds};
 use std::path::PathBuf;
@@ -195,6 +197,7 @@ impl fmt::Display for EscapeError {
 /// Errors returned when trying to retrieve a literal unescaped value.
 #[unstable(feature = "proc_macro_value", issue = "136652")]
 #[derive(Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ConversionErrorKind {
     /// The literal failed to be escaped, take a look at [`EscapeError`] for more information.
     FailedToUnescape(EscapeError),
@@ -242,7 +245,6 @@ impl !Sync for TokenStream {}
 /// The contained error message is explicitly not guaranteed to be stable in any way,
 /// and may change between Rust versions or across compilations.
 #[stable(feature = "proc_macro_lib", since = "1.15.0")]
-#[non_exhaustive]
 #[derive(Debug)]
 pub struct LexError(String);
 
@@ -293,7 +295,7 @@ impl TokenStream {
     /// Checks if this `TokenStream` is empty.
     #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     pub fn is_empty(&self) -> bool {
-        self.0.as_ref().map(|h| BridgeMethods::ts_is_empty(h)).unwrap_or(true)
+        self.0.as_ref().map(BridgeMethods::ts_is_empty).unwrap_or(true)
     }
 
     /// Parses this `TokenStream` as an expression and attempts to expand any
@@ -514,7 +516,7 @@ macro_rules! extend_items {
         $(
             #[stable(feature = "token_stream_extend_ts_items", since = "1.92.0")]
             impl Extend<$item> for TokenStream {
-                fn extend<T: IntoIterator<Item = $item>>(&mut self, iter: T) {
+                fn extend<I: IntoIterator<Item = $item>>(&mut self, iter: I) {
                     self.extend(iter.into_iter().map(TokenTree::$item));
                 }
             }
@@ -572,9 +574,7 @@ pub mod token_stream {
         type IntoIter = IntoIter;
 
         fn into_iter(self) -> IntoIter {
-            IntoIter(
-                self.0.map(|v| BridgeMethods::ts_into_trees(v)).unwrap_or_default().into_iter(),
-            )
+            IntoIter(self.0.map(BridgeMethods::ts_into_trees).unwrap_or_default().into_iter())
         }
     }
 }
@@ -592,7 +592,7 @@ pub macro quote($($t:tt)*) {
     /* compiler built-in */
 }
 
-#[unstable(feature = "proc_macro_internals", issue = "27812")]
+#[unstable(feature = "proc_macro_internals", issue = "none")]
 #[doc(hidden)]
 mod quote;
 
@@ -752,14 +752,14 @@ impl Span {
 
     // Used by the implementation of `Span::quote`
     #[doc(hidden)]
-    #[unstable(feature = "proc_macro_internals", issue = "27812")]
+    #[unstable(feature = "proc_macro_internals", issue = "none")]
     pub fn save_span(&self) -> usize {
         BridgeMethods::span_save_span(self.0)
     }
 
     // Used by the implementation of `Span::quote`
     #[doc(hidden)]
-    #[unstable(feature = "proc_macro_internals", issue = "27812")]
+    #[unstable(feature = "proc_macro_internals", issue = "none")]
     pub fn recover_proc_macro_span(id: usize) -> Span {
         Span(BridgeMethods::span_recover_proc_macro_span(id))
     }
@@ -1293,7 +1293,7 @@ macro_rules! unsuffixed_int_literals {
         /// specified on this token, meaning that invocations like
         /// `Literal::i8_unsuffixed(1)` are equivalent to
         /// `Literal::u32_unsuffixed(1)`.
-        /// Literals created from negative numbers might not survive rountrips through
+        /// Literals created from negative numbers might not survive roundtrips through
         /// `TokenStream` or strings and may be broken into two tokens (`-` and positive literal).
         ///
         /// Literals created through this method have the `Span::call_site()`
@@ -1309,6 +1309,63 @@ macro_rules! unsuffixed_int_literals {
             })
         }
     )*)
+}
+
+macro_rules! integer_values {
+    ($($nb:ident => $fn_name:ident,)+) => {
+        $(
+            #[doc = concat!(
+                "Returns the unescaped `",
+                stringify!($nb),
+                "` value if the literal is a `",
+                stringify!($nb),
+                "` or if it's an \"unmarked\" integer which doesn't overflow.")]
+            #[unstable(feature = "proc_macro_value", issue = "136652")]
+            pub fn $fn_name(&self) -> Result<$nb, ConversionErrorKind> {
+                if self.0.kind != bridge::LitKind::Integer {
+                    return Err(ConversionErrorKind::InvalidLiteralKind);
+                }
+                self.with_symbol_and_suffix(|symbol, suffix| {
+                    match suffix {
+                        stringify!($nb) | "" => {
+                            let symbol = strip_underscores(symbol);
+                            let (number, base) = parse_number(&symbol);
+                            $nb::from_str_radix(&number, base as u32).map_err(|_| ConversionErrorKind::InvalidLiteralKind)
+                        }
+                        _ => Err(ConversionErrorKind::InvalidLiteralKind),
+                    }
+                })
+            }
+        )+
+    }
+}
+
+macro_rules! float_values {
+    ($($nb:ident => $fn_name:ident,)+) => {
+        $(
+            #[doc = concat!(
+                "Returns the unescaped `",
+                stringify!($nb),
+                "` value if the literal is a `",
+                stringify!($nb),
+                "` or if it's an \"unmarked\" float which doesn't overflow.")]
+            #[unstable(feature = "proc_macro_value", issue = "136652")]
+            pub fn $fn_name(&self) -> Result<$nb, ConversionErrorKind> {
+                if self.0.kind != bridge::LitKind::Float {
+                    return Err(ConversionErrorKind::InvalidLiteralKind);
+                }
+                self.with_symbol_and_suffix(|symbol, suffix| {
+                    match suffix {
+                        stringify!($nb) | "" => {
+                            let number = strip_underscores(symbol);
+                            $nb::from_str(&number).map_err(|_| ConversionErrorKind::InvalidLiteralKind)
+                        }
+                        _ => Err(ConversionErrorKind::InvalidLiteralKind),
+                    }
+                })
+            }
+        )+
+    }
 }
 
 impl Literal {
@@ -1356,7 +1413,7 @@ impl Literal {
     /// This constructor is similar to those like `Literal::i8_unsuffixed` where
     /// the float's value is emitted directly into the token but no suffix is
     /// used, so it may be inferred to be a `f64` later in the compiler.
-    /// Literals created from negative numbers might not survive rountrips through
+    /// Literals created from negative numbers might not survive roundtrips through
     /// `TokenStream` or strings and may be broken into two tokens (`-` and positive literal).
     ///
     /// # Panics
@@ -1381,7 +1438,7 @@ impl Literal {
     /// specified is the preceding part of the token and `f32` is the suffix of
     /// the token. This token will always be inferred to be an `f32` in the
     /// compiler.
-    /// Literals created from negative numbers might not survive rountrips through
+    /// Literals created from negative numbers might not survive roundtrips through
     /// `TokenStream` or strings and may be broken into two tokens (`-` and positive literal).
     ///
     /// # Panics
@@ -1401,7 +1458,7 @@ impl Literal {
     /// This constructor is similar to those like `Literal::i8_unsuffixed` where
     /// the float's value is emitted directly into the token but no suffix is
     /// used, so it may be inferred to be a `f64` later in the compiler.
-    /// Literals created from negative numbers might not survive rountrips through
+    /// Literals created from negative numbers might not survive roundtrips through
     /// `TokenStream` or strings and may be broken into two tokens (`-` and positive literal).
     ///
     /// # Panics
@@ -1426,7 +1483,7 @@ impl Literal {
     /// specified is the preceding part of the token and `f64` is the suffix of
     /// the token. This token will always be inferred to be an `f64` in the
     /// compiler.
-    /// Literals created from negative numbers might not survive rountrips through
+    /// Literals created from negative numbers might not survive roundtrips through
     /// `TokenStream` or strings and may be broken into two tokens (`-` and positive literal).
     ///
     /// # Panics
@@ -1589,7 +1646,7 @@ impl Literal {
     #[unstable(feature = "proc_macro_value", issue = "136652")]
     pub fn byte_character_value(&self) -> Result<u8, ConversionErrorKind> {
         self.0.symbol.with(|symbol| match self.0.kind {
-            bridge::LitKind::Char => unescape_byte(symbol)
+            bridge::LitKind::Byte => unescape_byte(symbol)
                 .map_err(|err| ConversionErrorKind::FailedToUnescape(err.into())),
             _ => Err(ConversionErrorKind::InvalidLiteralKind),
         })
@@ -1704,6 +1761,82 @@ impl Literal {
             _ => Err(ConversionErrorKind::InvalidLiteralKind),
         })
     }
+
+    integer_values! {
+        u8 => u8_value,
+        u16 => u16_value,
+        u32 => u32_value,
+        u64 => u64_value,
+        u128 => u128_value,
+        i8 => i8_value,
+        i16 => i16_value,
+        i32 => i32_value,
+        i64 => i64_value,
+        i128 => i128_value,
+    }
+
+    float_values! {
+        f16 => f16_value,
+        f32 => f32_value,
+        f64 => f64_value,
+        // FIXME: `f128` doesn't implement `FromStr` for the moment so we cannot obtain it from
+        // a `&str`. To be uncommented when it's added.
+        // f128 => f128_value,
+    }
+}
+
+#[repr(u32)]
+#[derive(PartialEq, Eq)]
+enum Base {
+    Decimal = 10,
+    Binary = 2,
+    Octal = 8,
+    Hexadecimal = 16,
+}
+
+fn parse_number(value: &str) -> (&str, Base) {
+    let mut iter = value.as_bytes().iter().copied();
+    let Some(first_digit) = iter.next() else {
+        return ("0", Base::Decimal);
+    };
+    let Some(second_digit) = iter.next() else {
+        return (value, Base::Decimal);
+    };
+
+    let mut base = Base::Decimal;
+    if first_digit == b'0' {
+        // Attempt to parse encoding base.
+        match second_digit {
+            b'b' => {
+                base = Base::Binary;
+            }
+            b'o' => {
+                base = Base::Octal;
+            }
+            b'x' => {
+                base = Base::Hexadecimal;
+            }
+            _ => {}
+        }
+    }
+
+    let offset = if base == Base::Decimal { 0 } else { 2 };
+
+    (&value[offset..], base)
+}
+
+fn strip_underscores(value_s: &str) -> Cow<'_, str> {
+    let value = value_s.as_bytes();
+    if value.iter().copied().all(|c| c != b'_' && c != b'f') {
+        return Cow::Borrowed(value_s);
+    }
+    let mut output = String::with_capacity(value.len());
+    for c in value.iter().copied() {
+        if c != b'_' {
+            output.push(c as char);
+        }
+    }
+    Cow::Owned(output)
 }
 
 /// Parse a single literal from its stringified representation.
@@ -1777,7 +1910,7 @@ pub mod tracked {
     #[unstable(feature = "proc_macro_tracked_env", issue = "99515")]
     pub fn env_var<K: AsRef<OsStr> + AsRef<str>>(key: K) -> Result<String, VarError> {
         let key: &str = key.as_ref();
-        let value = BridgeMethods::injected_env_var(key).map_or_else(|| env::var(key), Ok);
+        let value = env::var(key);
         BridgeMethods::track_env_var(key, value.as_deref().ok());
         value
     }

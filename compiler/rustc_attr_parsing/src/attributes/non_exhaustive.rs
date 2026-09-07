@@ -1,6 +1,6 @@
+use rustc_attr_ir::AttributeKind;
+use rustc_attr_ir::target::Target;
 use rustc_feature::AttributeStability;
-use rustc_hir::Target;
-use rustc_hir::attrs::AttributeKind;
 use rustc_span::{Span, Symbol, sym};
 
 use crate::attributes::{NoArgsAttributeParser, OnDuplicate};
@@ -12,7 +12,7 @@ pub(crate) struct NonExhaustiveParser;
 impl NoArgsAttributeParser for NonExhaustiveParser {
     const PATH: &[Symbol] = &[sym::non_exhaustive];
     const ON_DUPLICATE: OnDuplicate = OnDuplicate::Warn;
-    const ALLOWED_TARGETS: AllowedTargets = AllowedTargets::AllowList(&[
+    const ALLOWED_TARGETS: AllowedTargets<'_> = AllowedTargets::AllowList(&[
         Allow(Target::Enum),
         Allow(Target::Struct),
         Allow(Target::Variant),

@@ -107,3 +107,54 @@ mod macros {
         }
     }
 }
+
+mod issue17179 {
+    struct Test;
+
+    impl crate::HasAsyncMethod for Test {
+        async fn do_something() -> u32 {
+            //~^ unused_async_trait_impl
+
+            fn local_func() -> u32 {
+                if 5 == 2 {
+                    return 1;
+                }
+                2
+            }
+
+            let f = || {
+                if 5 == 2 {
+                    return 1;
+                }
+                2
+            };
+
+            if f() == 5 {
+                return 3;
+            }
+
+            5
+        }
+    }
+}
+
+mod issue17162 {
+    trait AsyncTraitWithSelf {
+        async fn do_something(&self) -> u32;
+    }
+
+    impl AsyncTraitWithSelf for ! {
+        async fn do_something(&self) -> u32 {
+            unreachable!()
+        }
+    }
+
+    // so this should lint, cause no self parameter, can be called via <! as
+    // HasAsyncMethod>::do_something()
+    impl crate::HasAsyncMethod for ! {
+        async fn do_something() -> u32 {
+            //~^ unused_async_trait_impl
+            1
+        }
+    }
+}

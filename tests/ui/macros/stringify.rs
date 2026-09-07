@@ -5,7 +5,6 @@
 #![allow(incomplete_features)]
 #![allow(unused_features)]
 #![feature(auto_traits)]
-#![feature(box_patterns)]
 #![feature(const_block_items)]
 #![feature(const_trait_impl)]
 #![feature(coroutines)]
@@ -491,7 +490,7 @@ fn test_item() {
     c1!(item, [ pub impl Struct {} ], "pub impl Struct {}");
     c1!(item, [ impl<T> Struct<T> {} ], "impl<T> Struct<T> {}");
     c1!(item, [ pub impl Trait for Struct {} ], "pub impl Trait for Struct {}");
-    c1!(item, [ impl<T> const Trait for T {} ], "impl<T> const Trait for T {}");
+    c1!(item, [ const impl<T> Trait for T {} ], "const impl<T> Trait for T {}");
 
     // ItemKind::MacCall
     c1!(item, [ mac!(); ], "mac!();");
@@ -578,9 +577,6 @@ fn test_pat() {
     c1!(pat, [ () ], "()");
     c1!(pat, [ (true,) ], "(true,)");
     c1!(pat, [ (true, false) ], "(true, false)");
-
-    // PatKind::Box
-    c1!(pat, [ box pat ], "box pat");
 
     // PatKind::Ref
     c1!(pat, [ &pat ], "&pat");

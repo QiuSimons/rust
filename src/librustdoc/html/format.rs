@@ -27,7 +27,7 @@ use tracing::{debug, trace};
 use super::url_parts_builder::UrlPartsBuilder;
 use crate::clean::types::ExternalLocation;
 use crate::clean::utils::find_nearest_parent_module;
-use crate::clean::{self, ExternalCrate, PrimitiveType};
+use crate::clean::{self, ExternalCrate, PrimitiveType, WherePredicate};
 use crate::display::{Joined as _, MaybeDisplay as _, WithOpts, Wrapped};
 use crate::formats::cache::Cache;
 use crate::formats::item_type::ItemType;
@@ -138,7 +138,7 @@ fn print_where_predicate(predicate: &clean::WherePredicate, cx: &Context<'_>) ->
                 }
                 Ok(())
             }
-            clean::WherePredicate::EqPredicate { lhs, rhs } => {
+            clean::WherePredicate::ProjectionPredicate { lhs, rhs } => {
                 let opts = WithOpts::from(f);
                 write!(
                     f,
@@ -164,69 +164,59 @@ pub(crate) fn print_where_clause(
         return None;
     }
 
+    fn where_preds(
+        predicates: &[WherePredicate],
+        cx: &Context<'_>,
+        sep: impl Display,
+    ) -> impl Display {
+        fmt::from_fn(move |f| {
+            predicates.iter().map(|predicate| print_where_predicate(predicate, cx)).joined(&sep, f)
+        })
+    }
+
+    let spaces = |n: usize| crate::display::repeat(' ', n);
+
     Some(fmt::from_fn(move |f| {
-        let where_preds = fmt::from_fn(|f| {
-            gens.where_predicates
-                .iter()
-                .map(|predicate| {
-                    fmt::from_fn(|f| {
-                        if f.alternate() {
-                            f.write_str(" ")?;
-                        } else {
-                            f.write_str("\n")?;
-                        }
-                        print_where_predicate(predicate, cx).fmt(f)
-                    })
-                })
-                .joined(",", f)
-        });
-
-        let clause = if f.alternate() {
+        if f.alternate() {
+            write!(f, " where {:#}", where_preds(&gens.where_predicates, cx, ", "))?;
             if ending == Ending::Newline {
-                format!(" where{where_preds:#},")
-            } else {
-                format!(" where{where_preds:#}")
+                f.write_char(',')?;
             }
-        } else {
-            let mut br_with_padding = String::with_capacity(6 * indent + 28);
-            br_with_padding.push('\n');
+            return Ok(());
+        }
 
-            let where_indent = 3;
+        const WHERE_INDENT: usize = 3;
+
+        let padding = {
             let padding_amount = if ending == Ending::Newline {
                 indent + 4
             } else if indent == 0 {
                 4
             } else {
-                indent + where_indent + "where ".len()
+                indent + WHERE_INDENT + "where ".len()
             };
-
-            for _ in 0..padding_amount {
-                br_with_padding.push(' ');
-            }
-            let where_preds = where_preds.to_string().replace('\n', &br_with_padding);
-
-            if ending == Ending::Newline {
-                let mut clause = " ".repeat(indent.saturating_sub(1));
-                write!(clause, "<div class=\"where\">where{where_preds},</div>")?;
-                clause
-            } else {
-                // insert a newline after a single space but before multiple spaces at the start
-                if indent == 0 {
-                    format!("\n<span class=\"where\">where{where_preds}</span>")
-                } else {
-                    // put the first one on the same line as the 'where' keyword
-                    let where_preds = where_preds.replacen(&br_with_padding, " ", 1);
-
-                    let mut clause = br_with_padding;
-                    // +1 is for `\n`.
-                    clause.truncate(indent + 1 + where_indent);
-
-                    write!(clause, "<span class=\"where\">where{where_preds}</span>")?;
-                    clause
-                }
-            }
+            spaces(padding_amount)
         };
-        write!(f, "{clause}")
+
+        let br_with_padding = format_args!("\n{padding}");
+        let sep = format_args!(",{br_with_padding}");
+        let where_preds = where_preds(&gens.where_predicates, cx, sep);
+
+        if ending == Ending::Newline {
+            write!(
+                f,
+                "{indent}<div class=\"where\">where{br_with_padding}{where_preds},</div>",
+                indent = spaces(indent.saturating_sub(1)),
+            )
+        } else if indent == 0 {
+            write!(f, "\n<span class=\"where\">where{br_with_padding}{where_preds}</span>")
+        } else {
+            write!(
+                f,
+                "\n{indent}<span class=\"where\">where {where_preds}</span>",
+                indent = spaces(indent + WHERE_INDENT),
+            )
+        }
     }))
 }
 
@@ -684,11 +674,15 @@ pub(crate) fn link_tooltip(
             fqp
         };
         if let &Some(UrlFragment::Item(id)) = fragment {
-            write!(f, "{} ", cx.tcx().def_descr(id))?;
+            let tcx = cx.tcx();
+            write!(f, "{} ", tcx.def_descr(id))?;
             for component in fqp {
                 write!(f, "{component}::")?;
             }
-            write!(f, "{}", cx.tcx().item_name(id))?;
+            if *shortty == ItemType::Enum && tcx.def_kind(id) == DefKind::Field {
+                write!(f, "{}::", tcx.item_name(tcx.parent(id)))?;
+            }
+            write!(f, "{}", tcx.item_name(id))?;
         } else if !fqp.is_empty() {
             write!(f, "{shortty} ")?;
             write!(f, "{}", join_path_syms(fqp))?;
@@ -1261,7 +1255,9 @@ pub(crate) fn print_params(params: &[clean::Parameter], cx: &Context<'_>) -> imp
             .iter()
             .map(|param| {
                 fmt::from_fn(|f| {
-                    if let Some(name) = param.name {
+                    if param.is_splat {
+                        write!(f, "…: ")?;
+                    } else if let Some(name) = param.name {
                         write!(f, "{name}: ")?;
                     }
                     print_type(&param.type_, cx).fmt(f)
@@ -1315,7 +1311,9 @@ fn print_parameter(parameter: &clean::Parameter, cx: &Context<'_>) -> impl fmt::
             if parameter.is_const {
                 write!(f, "const ")?;
             }
-            if let Some(name) = parameter.name {
+            if parameter.is_splat {
+                write!(f, "…: ")?;
+            } else if let Some(name) = parameter.name {
                 write!(f, "{name}: ")?;
             }
             print_type(&parameter.type_, cx).fmt(f)
@@ -1431,29 +1429,29 @@ pub(crate) fn visibility_print_with_space(item: &clean::Item, cx: &Context<'_>) 
 
         match vis {
             ty::Visibility::Public => f.write_str("pub ")?,
-            ty::Visibility::Restricted(vis_did) => {
+            ty::Visibility::Restricted(vis_mod_id) => {
                 // FIXME(camelid): This may not work correctly if `item_did` is a module.
                 //                 However, rustdoc currently never displays a module's
                 //                 visibility, so it shouldn't matter.
                 let parent_module =
                     find_nearest_parent_module(cx.tcx(), item.item_id.expect_def_id());
 
-                if vis_did.is_crate_root() {
+                if vis_mod_id.is_crate_root() {
                     f.write_str("pub(crate) ")?;
-                } else if parent_module == Some(vis_did) {
+                } else if parent_module == Some(vis_mod_id) {
                     // `pub(in foo)` where `foo` is the parent module
                     // is the same as no visibility modifier; do nothing
                 } else if parent_module
-                    .and_then(|parent| find_nearest_parent_module(cx.tcx(), parent))
-                    == Some(vis_did)
+                    .and_then(|parent| find_nearest_parent_module(cx.tcx(), parent.to_def_id()))
+                    == Some(vis_mod_id)
                 {
                     f.write_str("pub(super) ")?;
                 } else {
-                    let path = cx.tcx().def_path(vis_did);
+                    let path = cx.tcx().def_path(vis_mod_id.to_def_id());
                     debug!("path={path:?}");
                     // modified from `resolved_path()` to work with `DefPathData`
                     let last_name = path.data.last().unwrap().data.get_opt_name().unwrap();
-                    let anchor = print_anchor(vis_did, last_name, cx);
+                    let anchor = print_anchor(vis_mod_id.to_def_id(), last_name, cx);
 
                     f.write_str("pub(in ")?;
                     for seg in &path.data[..path.data.len() - 1] {
@@ -1509,15 +1507,21 @@ pub(crate) fn print_constness_with_space(
     overall_stab: Option<StableSince>,
     const_stab: Option<ConstStability>,
 ) -> &'static str {
-    match c {
-        hir::Constness::Const => match (overall_stab, const_stab) {
+    match *c {
+        hir::Constness::Const { always } => match (overall_stab, const_stab) {
             // const stable...
             (_, Some(ConstStability { level: StabilityLevel::Stable { .. }, .. }))
             // ...or when feature(staged_api) is not set...
             | (_, None)
             // ...or when const unstable, but overall unstable too
             | (None, Some(ConstStability { level: StabilityLevel::Unstable { .. }, .. })) => {
-                "const "
+                if always {
+                    // FIXME(comptime) show something when stable, currently relying on the attribute
+                    // being rendered as part of the regular attribute list.
+                    ""
+                } else {
+                    "const "
+                }
             }
             // const unstable (and overall stable)
             (Some(_), Some(ConstStability { level: StabilityLevel::Unstable { .. }, .. })) => "",

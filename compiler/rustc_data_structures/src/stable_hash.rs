@@ -6,6 +6,9 @@ use std::num::NonZero;
 use rustc_index::bit_set::{self, DenseBitSet};
 use rustc_index::{Idx, IndexSlice, IndexVec};
 use smallvec::SmallVec;
+use thin_vec::ThinVec;
+
+use crate::fingerprint::Fingerprint;
 
 #[cfg(test)]
 mod tests;
@@ -23,8 +26,8 @@ pub trait StableHashCtxt {
     /// The main event: stable hashing of a span.
     fn stable_hash_span(&mut self, span: RawSpan, hasher: &mut StableHasher);
 
-    /// Compute a `DefPathHash`.
-    fn def_path_hash(&self, def_id: RawDefId) -> RawDefPathHash;
+    /// Compute a `Fingerprint`, which can be trivially turned into a `DefPathHash`.
+    fn def_path_hash(&self, def_id: RawDefId) -> Fingerprint;
 
     /// Get the stable hash controls.
     fn stable_hash_controls(&self) -> StableHashControls;
@@ -41,10 +44,6 @@ pub struct RawSpan(pub u32, pub u16, pub u16);
 // A type used to work around `DefId` not being visible in this crate. It is the same size as
 // `DefId`.
 pub struct RawDefId(pub u32, pub u32);
-
-// A type used to work around `DefPathHash` not being visible in this crate. It is the same size as
-// `DefPathHash`.
-pub struct RawDefPathHash(pub [u8; 16]);
 
 /// Something that implements `StableHash` can be hashed in a way that is
 /// stable across multiple compilation sessions.
@@ -237,14 +236,7 @@ impl<T> StableHash for PhantomData<T> {
     fn stable_hash<Hcx>(&self, _hcx: &mut Hcx, _hasher: &mut StableHasher) {}
 }
 
-impl StableHash for NonZero<u32> {
-    #[inline]
-    fn stable_hash<Hcx: StableHashCtxt>(&self, hcx: &mut Hcx, hasher: &mut StableHasher) {
-        self.get().stable_hash(hcx, hasher)
-    }
-}
-
-impl StableHash for NonZero<usize> {
+impl<T: StableHash + std::num::ZeroablePrimitive> StableHash for NonZero<T> {
     #[inline]
     fn stable_hash<Hcx: StableHashCtxt>(&self, hcx: &mut Hcx, hasher: &mut StableHasher) {
         self.get().stable_hash(hcx, hasher)
@@ -402,6 +394,13 @@ impl<A, const N: usize> StableHash for SmallVec<[A; N]>
 where
     A: StableHash,
 {
+    #[inline]
+    fn stable_hash<Hcx: StableHashCtxt>(&self, hcx: &mut Hcx, hasher: &mut StableHasher) {
+        self[..].stable_hash(hcx, hasher);
+    }
+}
+
+impl<T: StableHash> StableHash for ThinVec<T> {
     #[inline]
     fn stable_hash<Hcx: StableHashCtxt>(&self, hcx: &mut Hcx, hasher: &mut StableHasher) {
         self[..].stable_hash(hcx, hasher);

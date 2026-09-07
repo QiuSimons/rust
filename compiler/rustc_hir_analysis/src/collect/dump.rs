@@ -3,8 +3,52 @@ use rustc_hir::def::DefKind;
 use rustc_hir::def_id::LocalDefId;
 use rustc_hir::{find_attr, intravisit};
 use rustc_middle::hir::nested_filter;
+use rustc_middle::middle::resolve_bound_vars::ObjectLifetimeDefault;
 use rustc_middle::ty::{self, TyCtxt, TypeVisitableExt, Unnormalized};
 use rustc_span::sym;
+
+pub(crate) fn generics(tcx: TyCtxt<'_>) {
+    for did in tcx.hir_crate_items(()).definitions() {
+        if did == hir::def_id::CRATE_DEF_ID {
+            continue;
+        }
+
+        if find_attr!(tcx, did, RustcDumpGenerics) {
+            let span = tcx.def_span(did);
+
+            let mut diag =
+                tcx.dcx().struct_span_err(span, format!("{}: {did:?}", sym::rustc_dump_generics));
+
+            let generics = tcx.generics_of(did);
+            diag.span_note(tcx.def_span(did), format!("{generics:#?}"));
+            diag.emit();
+        }
+    }
+}
+
+pub(crate) fn object_lifetime_defaults(tcx: TyCtxt<'_>) {
+    for def_id in tcx.hir_crate_items(()).definitions() {
+        if def_id == hir::def_id::CRATE_DEF_ID {
+            continue;
+        }
+
+        if !find_attr!(tcx, def_id, RustcDumpObjectLifetimeDefaults) {
+            continue;
+        }
+
+        for param in &tcx.generics_of(def_id).own_params {
+            let ty::GenericParamDefKind::Type { .. } = param.kind else { continue };
+            let default = tcx.object_lifetime_default(param.def_id);
+            let repr = match default {
+                ObjectLifetimeDefault::Empty => "Empty".to_owned(),
+                ObjectLifetimeDefault::Static => "'static".to_owned(),
+                ObjectLifetimeDefault::Param(def_id) => tcx.item_name(def_id).to_string(),
+                ObjectLifetimeDefault::Ambiguous => "Ambiguous".to_owned(),
+            };
+            tcx.dcx().span_err(tcx.def_span(param.def_id), repr);
+        }
+    }
+}
 
 pub(crate) fn opaque_hidden_types(tcx: TyCtxt<'_>) {
     if !find_attr!(tcx, crate, RustcDumpHiddenTypeOfOpaques) {
@@ -22,27 +66,27 @@ pub(crate) fn opaque_hidden_types(tcx: TyCtxt<'_>) {
 
         let ty = tcx.type_of(id).instantiate_identity().skip_norm_wip();
         let span = tcx.def_span(id);
-        tcx.dcx().emit_err(crate::errors::TypeOf { span, ty });
+        tcx.dcx().emit_err(crate::diagnostics::TypeOf { span, ty });
     }
 }
 
-pub(crate) fn predicates_and_item_bounds(tcx: TyCtxt<'_>) {
+pub(crate) fn clauses_and_item_bounds(tcx: TyCtxt<'_>) {
     for id in tcx.hir_crate_items(()).owners() {
         #[expect(deprecated)] // we don't want to unnecessarily retrieve the attrs twice in a row.
         let attrs = tcx.get_all_attrs(id);
 
-        if find_attr!(attrs, RustcDumpPredicates) {
-            let preds = tcx
-                .predicates_of(id)
+        if find_attr!(attrs, RustcDumpClauses) {
+            let clauses = tcx
+                .clauses_of(id)
                 .instantiate_identity(tcx)
-                .predicates
+                .clauses
                 .into_iter()
                 .map(Unnormalized::skip_norm_wip);
             let span = tcx.def_span(id);
 
-            let mut diag = tcx.dcx().struct_span_err(span, sym::rustc_dump_predicates.as_str());
-            for pred in preds {
-                diag.note(format!("{pred:?}"));
+            let mut diag = tcx.dcx().struct_span_err(span, sym::rustc_dump_clauses.as_str());
+            for clause in clauses {
+                diag.note(format!("{clause:?}"));
             }
             diag.emit();
         }
@@ -101,10 +145,9 @@ pub(crate) fn def_parents(tcx: TyCtxt<'_>) {
             for did in [did].into_iter().chain(anon_ct_finder.anon_consts) {
                 let span = tcx.def_span(did);
 
-                let mut diag = tcx.dcx().struct_span_err(
-                    span,
-                    format!("{}: {did:?}", sym::rustc_dump_def_parents.as_str()),
-                );
+                let mut diag = tcx
+                    .dcx()
+                    .struct_span_err(span, format!("{}: {did:?}", sym::rustc_dump_def_parents));
 
                 let mut current_did = did.to_def_id();
                 while let Some(parent_did) = tcx.opt_parent(current_did) {

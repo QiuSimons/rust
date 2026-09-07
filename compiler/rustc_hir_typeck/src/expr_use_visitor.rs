@@ -217,7 +217,7 @@ impl<'tcx> TypeInformationCtxt<'tcx> for &FnCtxt<'_, 'tcx> {
     }
 
     fn body_owner_def_id(&self) -> LocalDefId {
-        self.body_id
+        self.body_def_id
     }
 
     fn tcx(&self) -> TyCtxt<'tcx> {
@@ -234,7 +234,7 @@ impl<'tcx> TypeInformationCtxt<'tcx> for (&LateContext<'tcx>, LocalDefId) {
     type Error = !;
 
     fn typeck_results(&self) -> Self::TypeckResults<'_> {
-        self.0.maybe_typeck_results().expect("expected typeck results")
+        self.0.typeck_results()
     }
 
     fn structurally_resolve_type(&self, _span: Span, ty: Ty<'tcx>) -> Ty<'tcx> {
@@ -451,7 +451,7 @@ impl<'tcx, Cx: TypeInformationCtxt<'tcx>, D: Delegate<'tcx>> ExprUseVisitor<'tcx
             }
 
             hir::ExprKind::Let(hir::LetExpr { pat, init, .. }) => {
-                self.walk_local(init, pat, None, || self.borrow_expr(init, BorrowKind::Immutable))?;
+                self.walk_local(init, pat, None)?;
             }
 
             hir::ExprKind::Match(discr, arms, _) => {
@@ -577,7 +577,7 @@ impl<'tcx, Cx: TypeInformationCtxt<'tcx>, D: Delegate<'tcx>> ExprUseVisitor<'tcx
     fn walk_stmt(&self, stmt: &hir::Stmt<'_>) -> Result<(), Cx::Error> {
         match stmt.kind {
             hir::StmtKind::Let(hir::LetStmt { pat, init: Some(expr), els, .. }) => {
-                self.walk_local(expr, pat, *els, || Ok(()))?;
+                self.walk_local(expr, pat, *els)?;
             }
 
             hir::StmtKind::Let(_) => {}
@@ -617,19 +617,14 @@ impl<'tcx, Cx: TypeInformationCtxt<'tcx>, D: Delegate<'tcx>> ExprUseVisitor<'tcx
         Ok(())
     }
 
-    fn walk_local<F>(
+    fn walk_local(
         &self,
         expr: &hir::Expr<'_>,
         pat: &hir::Pat<'_>,
         els: Option<&hir::Block<'_>>,
-        mut f: F,
-    ) -> Result<(), Cx::Error>
-    where
-        F: FnMut() -> Result<(), Cx::Error>,
-    {
+    ) -> Result<(), Cx::Error> {
         self.walk_expr(expr)?;
         let expr_place = self.cat_expr(expr)?;
-        f()?;
         self.fake_read_scrutinee(&expr_place, els.is_some())?;
         self.walk_pat(&expr_place, pat, false)?;
         if let Some(els) = els {
@@ -727,7 +722,8 @@ impl<'tcx, Cx: TypeInformationCtxt<'tcx>, D: Delegate<'tcx>> ExprUseVisitor<'tcx
         let typeck_results = self.cx.typeck_results();
         let adjustments = typeck_results.expr_adjustments(expr);
         let mut place_with_id = self.cat_expr_unadjusted(expr)?;
-        for adjustment in adjustments {
+        for (adjustment_index, adjustment) in adjustments.iter().enumerate() {
+            let is_last_adjustment = adjustment_index + 1 == adjustments.len();
             debug!("walk_adjustment expr={:?} adj={:?}", expr, adjustment);
             match adjustment.kind {
                 adjustment::Adjust::NeverToAny | adjustment::Adjust::Pointer(_) => {
@@ -752,13 +748,13 @@ impl<'tcx, Cx: TypeInformationCtxt<'tcx>, D: Delegate<'tcx>> ExprUseVisitor<'tcx
                     self.walk_autoref(expr, &place_with_id, autoref);
                 }
 
-                adjustment::Adjust::GenericReborrow(_reborrow) => {
-                    // To build an expression as a place expression, it needs to be a field
-                    // projection or deref at the outmost layer. So it is field projection or deref
-                    // on an adjusted value. But this means that adjustment is applied on a
-                    // subexpression that is not the final operand/rvalue for function call or
-                    // assignment. This is a contradiction.
-                    unreachable!("Reborrow trait usage during adjustment walk");
+                adjustment::Adjust::GenericReborrow(mutability) if is_last_adjustment => {
+                    let bk = ty::BorrowKind::from_mutbl(mutability);
+                    self.delegate.borrow_mut().borrow(&place_with_id, place_with_id.hir_id, bk);
+                }
+
+                adjustment::Adjust::GenericReborrow(_) => {
+                    span_bug!(expr.span, "generic reborrow adjustment must be terminal");
                 }
             }
             place_with_id = self.cat_expr_adjusted(expr, place_with_id, adjustment)?;
@@ -957,7 +953,6 @@ impl<'tcx, Cx: TypeInformationCtxt<'tcx>, D: Delegate<'tcx>> ExprUseVisitor<'tcx
                     }
                 }
                 PatKind::Or(_)
-                | PatKind::Box(_)
                 | PatKind::Ref(..)
                 | PatKind::Guard(..)
                 | PatKind::Tuple(..)
@@ -1767,8 +1762,8 @@ impl<'tcx, Cx: TypeInformationCtxt<'tcx>, D: Delegate<'tcx>> ExprUseVisitor<'tcx
                 self.cat_pattern(place_with_id, subpat, op)?;
             }
 
-            PatKind::Box(subpat) | PatKind::Ref(subpat, _, _) => {
-                // box p1, &p1, &mut p1. we can ignore the mutability of
+            PatKind::Ref(subpat, _, _) => {
+                // &p1, &mut p1. we can ignore the mutability of
                 // PatKind::Ref since that information is already contained
                 // in the type.
                 let subplace = self.cat_deref(pat.hir_id, place_with_id)?;

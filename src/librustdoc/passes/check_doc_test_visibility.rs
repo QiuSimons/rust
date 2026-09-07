@@ -10,25 +10,19 @@ use rustc_macros::Diagnostic;
 use rustc_middle::lint::LintLevelSource;
 use tracing::debug;
 
-use super::Pass;
-use crate::clean;
 use crate::clean::utils::inherits_doc_hidden;
-use crate::clean::*;
+use crate::clean::{self, *};
 use crate::core::DocContext;
-use crate::html::markdown::{ErrorCodes, Ignore, LangString, MdRelLine, find_testable_code};
-use crate::visit::DocVisitor;
-
-pub(crate) const CHECK_DOC_TEST_VISIBILITY: Pass = Pass {
-    name: "check_doc_test_visibility",
-    run: Some(check_doc_test_visibility),
-    description: "run various visibility-related lints on doctests",
+use crate::html::markdown::{
+    CodeLineMapping, ErrorCodes, Ignore, LangString, MdRelLine, find_testable_code,
 };
+use crate::visit::DocVisitor;
 
 struct DocTestVisibilityLinter<'a, 'tcx> {
     cx: &'a mut DocContext<'tcx>,
 }
 
-pub(crate) fn check_doc_test_visibility(krate: Crate, cx: &mut DocContext<'_>) -> Crate {
+pub(super) fn check_doc_test_visibility(krate: Crate, cx: &mut DocContext<'_>) -> Crate {
     let mut coll = DocTestVisibilityLinter { cx };
     coll.visit_crate(&krate);
     krate
@@ -47,7 +41,7 @@ pub(crate) struct Tests {
 }
 
 impl crate::doctest::DocTestVisitor for Tests {
-    fn visit_test(&mut self, _: String, config: LangString, _: MdRelLine) {
+    fn visit_test(&mut self, _: String, config: LangString, _: MdRelLine, _: Vec<CodeLineMapping>) {
         if config.rust && config.ignore == Ignore::None {
             self.found_tests += 1;
         }

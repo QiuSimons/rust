@@ -179,12 +179,11 @@ Tests for borrow checking. E.g. lifetime analysis, borrowing rules, and diagnost
 
 ## `tests/ui/box/`: Box Behavior
 
-Tests for `Box<T>` smart pointer and `#![feature(box_patterns)]`. E.g. allocation, deref coercion, and edge cases in box pattern matching and placement.
+Tests for the `Box<T>` smart pointer. E.g. allocation, deref coercion, and edge cases in box pattern matching and placement.
 
 See:
 
 - [`std::box::Boxed`](https://doc.rust-lang.org/std/boxed/struct.Box.html)
-- [Tracking issue for `box_patterns` feature #29641](https://github.com/rust-lang/rust/issues/29641)
 
 ## `tests/ui/builtin-superkinds/`: Built-in Trait Hierarchy Tests
 
@@ -215,6 +214,10 @@ See [Conditional compilation | Reference](https://doc.rust-lang.org/reference/co
 Tests for the `--check-cfg` compiler mechanism  for checking cfg configurations, for `#[cfg(..)]` and `cfg!(..)`.
 
 See [Checking conditional configurations | The rustc book](https://doc.rust-lang.org/rustc/check-cfg.html).
+
+## `tests/ui/checked-type-alias/`
+
+Tests for `#![feature(checked_type_aliases)]`. See [Tracking issue for checked type aliases](https://github.com/rust-lang/rust/issues/112792).
 
 ## `tests/ui/closure-expected-type/`: Closure type inference
 
@@ -295,6 +298,10 @@ Tests for compile flags.
 ## `tests/ui/compiletest-self-test/`: compiletest "meta" tests
 
 Meta test suite of the test harness `compiletest` itself.
+
+## `tests/ui/comptime`: compile-time only functions and intrinsics
+
+Test the `#[rustc_comptime]` attribute and intrinsics that inherently can only run at compile-time.
 
 ## `tests/ui/conditional-compilation/`: Conditional Compilation
 
@@ -762,10 +769,6 @@ Tests for the `{std,core}::intrinsics`, internal implementation detail.
 
 Tests for I/O related behaviour, covering stdout/stderr handling and error propagation.
 
-## `tests/ui/issues/`: Tests directly related to GitHub issues
-
-**FIXME (#133895)**: Random collection of regression tests and tests for issues, tests in this directory should be audited and rehomed.
-
 ## `tests/ui/iterators/`
 
 These tests revolve around anything to do with iterators, e.g. mismatched types.
@@ -795,10 +798,6 @@ See [Early vs Late bound parameters | rustc-dev-guide](https://rustc-dev-guide.r
 ## `tests/ui/layout/`
 
 See [Type Layout | Reference](https://doc.rust-lang.org/reference/type-layout.html).
-
-## `tests/ui/lazy-type-alias/`
-
-Tests for `#![feature(lazy_type_alias)]`. See [Tracking issue for lazy type aliases #112792](https://github.com/rust-lang/rust/issues/112792).
 
 ## `tests/ui/lazy-type-alias-impl-trait/`
 
@@ -1047,7 +1046,7 @@ Broad category of tests about panics in general, often but not necessarily using
 
 ## `tests/ui/parallel-rustc/`
 
-Efforts towards a [Parallel Rustc Front-end](https://github.com/rust-lang/rust/issues/113349). Includes `-Zthreads=`.
+Regression tests for [Parallel Rustc Front-end](https://github.com/rust-lang/rust/issues/113349).
 
 ## `tests/ui/parser/`
 
@@ -1078,6 +1077,10 @@ See [Tracking issue for pin ergonomics #130494](https://github.com/rust-lang/rus
 ## `tests/ui/pin-macro/`
 
 See [`std::pin`](https://doc.rust-lang.org/std/pin/).
+
+## `tests/ui/pointer_authentication/`
+
+Tests for `-Zpointer-authentication` compiler flag.
 
 ## `tests/ui/precondition-checks/`
 
@@ -1287,6 +1290,12 @@ An assorted collection of tests that involves specific diagnostic spans.
 
 See [Tracking issue for specialization (RFC 1210) #31844](https://github.com/rust-lang/rust/issues/31844).
 
+## `tests/ui/splat`
+
+Tests for the `#![feature(splat)]` attribute.
+
+See [Tracking Issue for argument splatting #153629](https://github.com/rust-lang/rust/issues/153629).
+
 ## `tests/ui/stability-attribute/`
 
 Stability attributes used internally by the standard library: `#[stable()]` and `#[unstable()]`.
@@ -1340,6 +1349,10 @@ Tests on both structs and enums.
 Generic collection of tests for suggestions, when no more specific directories are applicable.
 
 **FIXME**: Some overlap with `tests/ui/did_you_mean/`, that directory should probably be moved under here.
+
+## `tests/ui/supertrait-shadowing/`
+
+Tests for supertrait item shadowing (RFC 3624).
 
 ## `tests/ui/svh/`: Strict Version Hash
 
@@ -1568,6 +1581,13 @@ See [Variance | Reference](https://doc.rust-lang.org/reference/subtyping.html#va
 Tests on `enum` variants.
 
 **FIXME**: Should be rehomed with `tests/ui/enum/`.
+
+## `tests/ui/view-types`
+
+Anything related to view types.
+
+See
+[Tracking Issue for view types](https://github.com/rust-lang/rust/issues/155938).
 
 ## `tests/ui/wasm/`
 

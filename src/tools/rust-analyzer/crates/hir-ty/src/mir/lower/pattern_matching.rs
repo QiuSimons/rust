@@ -1,17 +1,19 @@
 //! MIR lowering for patterns
 
-use hir_def::{hir::ExprId, signatures::VariantFields};
+use hir_def::{
+    hir::{ExprId, RecordFieldPat},
+    signatures::VariantFields,
+};
 use rustc_type_ir::inherent::{IntoKind, Ty as _};
 
 use crate::{
     BindingMode, ByRef,
     mir::{
-        LocalId, MutBorrowKind, Operand, OperandKind, PlaceRef, Projection,
+        FieldIndex, LocalId, MutBorrowKind, Operand, OperandKind, PlaceRef, Projection,
         lower::{
-            BasicBlockId, BinOp, BindingId, BorrowKind, Either, Expr, FieldId, Idx, MemoryMap,
-            MirLowerCtx, MirLowerError, MirSpan, Pat, PatId, PlaceElem, ProjectionElem,
-            RecordFieldPat, ResolveValueResult, Result, Rvalue, SwitchTargets, TerminatorKind,
-            TupleFieldId, TupleId, Ty, TyKind, ValueNs, VariantId,
+            BasicBlockId, BinOp, BindingId, BorrowKind, Expr, Idx, MemoryMap, MirLowerCtx,
+            MirLowerError, MirSpan, Pat, PatId, PlaceElem, ProjectionElem, ResolveValueResult,
+            Result, Rvalue, SwitchTargets, TerminatorKind, Ty, TyKind, ValueNs, VariantId,
         },
     },
 };
@@ -135,7 +137,8 @@ impl<'db> MirLowerCtx<'_, 'db> {
             }
             Pat::Wild => (current, current_else),
             Pat::Tuple { args, ellipsis } => {
-                let subst = match self.infer.pat_ty(pattern).kind() {
+                let place_ty = cond_place.ty(&self.result, &self.infcx, self.env).ty;
+                let subst = match place_ty.kind() {
                     TyKind::Tuple(s) => s,
                     _ => {
                         return Err(MirLowerError::TypeError(
@@ -148,12 +151,7 @@ impl<'db> MirLowerCtx<'_, 'db> {
                     current_else,
                     args,
                     *ellipsis,
-                    (0..subst.len()).map(|i| {
-                        PlaceElem::Field(Either::Right(TupleFieldId {
-                            tuple: TupleId(!0), // Dummy as it is unused
-                            index: i as u32,
-                        }))
-                    }),
+                    (0..subst.len()).map(|i| PlaceElem::Field(FieldIndex(i as u32))),
                     &cond_place,
                     mode,
                 )?
@@ -493,6 +491,12 @@ impl<'db> MirLowerCtx<'_, 'db> {
                 )?
             }
             Pat::Ref { pat, mutability: _ } => {
+                let ty = cond_place.ty(&self.result, &self.infcx, self.env).ty;
+                if !ty.is_ref() {
+                    return Err(MirLowerError::TypeError(
+                        "non reference type matched with reference pattern",
+                    ));
+                }
                 let cond_place = cond_place.project(ProjectionElem::Deref);
                 self.pattern_match_inner(current, current_else, cond_place, *pat, mode)?
             }
@@ -604,6 +608,14 @@ impl<'db> MirLowerCtx<'_, 'db> {
         shape: AdtPatternShape<'_>,
         mode: MatchingMode,
     ) -> Result<'db, (BasicBlockId, Option<BasicBlockId>)> {
+        let place_ty = cond_place.ty(&self.result, &self.infcx, self.env).ty;
+        let Some((place_adt, _)) = place_ty.as_adt() else {
+            return Err(MirLowerError::TypeError("non ADT type matched with ADT pattern"));
+        };
+        if place_adt != variant.adt_id(self.db) {
+            return Err(MirLowerError::TypeError("ADT pattern does not match place type"));
+        }
+
         Ok(match variant {
             VariantId::EnumVariantId(v) => {
                 if mode == MatchingMode::Check {
@@ -662,6 +674,11 @@ impl<'db> MirLowerCtx<'_, 'db> {
         cond_place: &PlaceRef<'db>,
         mode: MatchingMode,
     ) -> Result<'db, (BasicBlockId, Option<BasicBlockId>)> {
+        let downcast_place = if matches!(v, VariantId::EnumVariantId(_)) {
+            cond_place.project(ProjectionElem::Downcast(v))
+        } else {
+            *cond_place
+        };
         Ok(match shape {
             AdtPatternShape::Record { args } => {
                 let it = args
@@ -669,28 +686,26 @@ impl<'db> MirLowerCtx<'_, 'db> {
                     .map(|x| {
                         let field_id =
                             variant_data.field(&x.name).ok_or(MirLowerError::UnresolvedField)?;
-                        Ok((
-                            PlaceElem::Field(Either::Left(FieldId {
-                                parent: v,
-                                local_id: field_id,
-                            })),
-                            x.pat,
-                        ))
+                        Ok((PlaceElem::Field(field_id.into()), x.pat))
                     })
                     .collect::<Result<'db, Vec<_>>>()?;
-                self.pattern_match_adt(current, current_else, it.into_iter(), cond_place, mode)?
+                self.pattern_match_adt(
+                    current,
+                    current_else,
+                    it.into_iter(),
+                    &downcast_place,
+                    mode,
+                )?
             }
             AdtPatternShape::Tuple { args, ellipsis } => {
-                let fields = variant_data.fields().iter().map(|(x, _)| {
-                    PlaceElem::Field(Either::Left(FieldId { parent: v, local_id: x }))
-                });
+                let fields = variant_data.fields().iter().map(|(x, _)| PlaceElem::Field(x.into()));
                 self.pattern_match_tuple_like(
                     current,
                     current_else,
                     args,
                     ellipsis,
                     fields,
-                    cond_place,
+                    &downcast_place,
                     mode,
                 )?
             }

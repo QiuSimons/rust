@@ -175,7 +175,6 @@ fixed_size_enum! {
         ( Use                                      )
         ( ForeignMod                               )
         ( AnonConst                                )
-        ( InlineConst                              )
         ( OpaqueTy                                 )
         ( Field                                    )
         ( LifetimeParam                            )
@@ -203,6 +202,7 @@ fixed_size_enum! {
         ( Macro(MACRO_KINDS_DERIVE_BANG)           )
         ( Macro(MACRO_KINDS_DERIVE_ATTR_BANG)      )
         ( SyntheticCoroutineBody                   )
+        ( TestBinderConstraints                    )
     } unreachable {
         ( Macro(_)                                 )
     }
@@ -225,8 +225,9 @@ defaulted_enum! {
 
 defaulted_enum! {
     hir::Constness {
-        ( Const    )
+        ( Const { always: false } )
         ( NotConst )
+        ( Const { always: true } )
     }
 }
 
@@ -486,7 +487,7 @@ impl<I: Idx, const N: usize, T: FixedSizeEncoding<ByteArray = [u8; N]>> TableBui
         }
     }
 
-    pub(crate) fn encode(&self, buf: &mut FileEncoder) -> LazyTable<I, T> {
+    pub(crate) fn encode(&self, buf: &mut FileEncoder<'_>) -> LazyTable<I, T> {
         let pos = buf.position();
 
         let width = self.width;

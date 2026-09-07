@@ -21,10 +21,12 @@ use crate::raw_vec::RawVec;
 macro non_null {
     (mut $place:expr, $t:ident) => {{
         #![allow(unused_unsafe)] // we're sometimes used within an unsafe block
+        // ignore-tidy-undocumented-unsafe
         unsafe { &mut *((&raw mut $place) as *mut NonNull<$t>) }
     }},
     ($place:expr, $t:ident) => {{
         #![allow(unused_unsafe)] // we're sometimes used within an unsafe block
+        // ignore-tidy-undocumented-unsafe
         unsafe { *((&raw const $place) as *const NonNull<$t>) }
     }},
 }
@@ -86,6 +88,7 @@ impl<T, A: Allocator> IntoIter<T, A> {
     /// ```
     #[stable(feature = "vec_into_iter_as_slice", since = "1.15.0")]
     pub fn as_slice(&self) -> &[T] {
+        // ignore-tidy-undocumented-unsafe
         unsafe { slice::from_raw_parts(self.ptr.as_ptr(), self.len()) }
     }
 
@@ -104,6 +107,7 @@ impl<T, A: Allocator> IntoIter<T, A> {
     /// ```
     #[stable(feature = "vec_into_iter_as_slice", since = "1.15.0")]
     pub fn as_mut_slice(&mut self) -> &mut [T] {
+        // ignore-tidy-undocumented-unsafe
         unsafe { &mut *self.as_raw_mut_slice() }
     }
 
@@ -153,6 +157,7 @@ impl<T, A: Allocator> IntoIter<T, A> {
 
         // Dropping the remaining elements can panic, so this needs to be
         // done only after updating the other fields.
+        // ignore-tidy-undocumented-unsafe
         unsafe {
             ptr::drop_in_place(remaining);
         }
@@ -196,12 +201,10 @@ impl<T, A: Allocator> IntoIter<T, A> {
     /// memory if there are any remaining elements.
     #[inline]
     unsafe fn dealloc_only(&mut self) {
-        unsafe {
-            // SAFETY: our caller promises not to touch `*self` again
-            let alloc = ManuallyDrop::take(&mut self.alloc);
-            // RawVec handles deallocation
-            let _ = RawVec::from_nonnull_in(self.buf, self.cap, alloc);
-        }
+        // SAFETY: our caller promises not to touch `*self` again.
+        let alloc = unsafe { ManuallyDrop::take(&mut self.alloc) };
+        // SAFETY: We're using this to deallocate a preexisting `RawVec`.
+        let _ = unsafe { RawVec::from_nonnull_in(self.buf, self.cap, alloc) };
     }
 
     #[cfg(not(no_global_oom_handling))]
@@ -263,9 +266,11 @@ impl<T, A: Allocator> Iterator for IntoIter<T, A> {
                 return None;
             }
             let old = self.ptr;
+            // ignore-tidy-undocumented-unsafe
             self.ptr = unsafe { old.add(1) };
             old
         };
+        // ignore-tidy-undocumented-unsafe
         Some(unsafe { ptr.read() })
     }
 
@@ -274,6 +279,7 @@ impl<T, A: Allocator> Iterator for IntoIter<T, A> {
         let exact = if T::IS_ZST {
             self.end.addr().wrapping_sub(self.ptr.as_ptr().addr())
         } else {
+            // ignore-tidy-undocumented-unsafe
             unsafe { non_null!(self.end, T).offset_from_unsigned(self.ptr) }
         };
         (exact, Some(exact))
@@ -316,18 +322,18 @@ impl<T, A: Allocator> Iterator for IntoIter<T, A> {
         if T::IS_ZST {
             if len < N {
                 self.forget_remaining_elements();
-                // Safety: ZSTs can be conjured ex nihilo, only the amount has to be correct
+                // SAFETY: ZSTs can be conjured ex nihilo, only the amount has to be correct
                 return Err(unsafe { array::IntoIter::new_unchecked(raw_ary, 0..len) });
             }
 
             self.end = self.end.wrapping_byte_sub(N);
-            // Safety: ditto
+            // SAFETY: ditto
             return Ok(unsafe { raw_ary.transpose().assume_init() });
         }
 
         if len < N {
-            // Safety: `len` indicates that this many elements are available and we just checked that
-            // it fits into the array.
+            // SAFETY: `len` indicates that this many elements are available and we
+            // just checked that it fits into the array.
             unsafe {
                 ptr::copy_nonoverlapping(self.ptr.as_ptr(), raw_ary.as_mut_ptr() as *mut T, len);
                 self.forget_remaining_elements();
@@ -335,7 +341,7 @@ impl<T, A: Allocator> Iterator for IntoIter<T, A> {
             }
         }
 
-        // Safety: `len` is larger than the array size. Copy a fixed amount here to fully initialize
+        // SAFETY: `len` is larger than the array size. Copy a fixed amount here to fully initialize
         // the array.
         unsafe {
             ptr::copy_nonoverlapping(self.ptr.as_ptr(), raw_ary.as_mut_ptr() as *mut T, N);
@@ -433,15 +439,58 @@ impl<T, A: Allocator> DoubleEndedIterator for IntoIter<T, A> {
             // Note that even though this is next_back() we're reading from `self.ptr`, not
             // `self.end`. We track our length using the byte offset from `self.ptr` to `self.end`,
             // so the end pointer may not be suitably aligned for T.
+            // ignore-tidy-undocumented-unsafe
             Some(unsafe { ptr::read(self.ptr.as_ptr()) })
         } else {
             if self.ptr == non_null!(self.end, T) {
                 return None;
             }
+            // ignore-tidy-undocumented-unsafe
             unsafe {
                 self.end = self.end.sub(1);
                 Some(ptr::read(self.end))
             }
+        }
+    }
+
+    #[inline]
+    fn next_chunk_back<const N: usize>(&mut self) -> Result<[T; N], core::array::IntoIter<T, N>> {
+        let mut raw_ary = [const { MaybeUninit::uninit() }; N];
+
+        let len = self.len();
+
+        if T::IS_ZST {
+            if len < N {
+                self.forget_remaining_elements();
+                // SAFETY: ZSTs can be conjured ex nihilo, only the amount has to be correct
+                return Err(unsafe { array::IntoIter::new_unchecked(raw_ary, N - len..N) });
+            }
+
+            self.end = self.end.wrapping_byte_sub(N);
+            // SAFETY: ditto
+            return Ok(unsafe { MaybeUninit::array_assume_init(raw_ary) });
+        }
+
+        if len < N {
+            // SAFETY: `len` indicates that this many elements are available
+            // and we just checked that it fits into the array.
+            unsafe {
+                ptr::copy_nonoverlapping(self.ptr.as_ptr(), raw_ary.as_mut_ptr() as *mut T, len);
+                self.forget_remaining_elements();
+                return Err(array::IntoIter::new_unchecked(raw_ary, 0..len));
+            }
+        }
+
+        // SAFETY: `len` is larger than the array size. Copy a fixed amount here to fully initialize
+        // the array.
+        unsafe {
+            ptr::copy_nonoverlapping(
+                self.ptr.add(len - N).as_ptr(),
+                raw_ary.as_mut_ptr() as *mut T,
+                N,
+            );
+            self.end = self.end.sub(N);
+            Ok(MaybeUninit::array_assume_init(raw_ary))
         }
     }
 
@@ -510,8 +559,8 @@ where
 
 #[doc(hidden)]
 #[unstable(issue = "none", feature = "std_internals")]
-#[rustc_unsafe_specialization_marker]
-pub trait NonDrop {}
+#[unsafe(rustc_allow_lifetime_dependent_specialization)]
+trait NonDrop {}
 
 // T: Copy as approximation for !Drop since get_unchecked does not advance self.ptr
 // and thus we can't implement drop-handling
@@ -544,6 +593,7 @@ unsafe impl<#[may_dangle] T, A: Allocator> Drop for IntoIter<T, A> {
 
         impl<T, A: Allocator> Drop for DropGuard<'_, T, A> {
             fn drop(&mut self) {
+                // ignore-tidy-undocumented-unsafe
                 unsafe {
                     self.0.dealloc_only();
                 }
@@ -552,6 +602,7 @@ unsafe impl<#[may_dangle] T, A: Allocator> Drop for IntoIter<T, A> {
 
         let guard = DropGuard(self);
         // destroy the remaining elements
+        // ignore-tidy-undocumented-unsafe
         unsafe {
             ptr::drop_in_place(guard.0.as_raw_mut_slice());
         }

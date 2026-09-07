@@ -1,10 +1,8 @@
 // data structures
 #[doc(hidden)]
-pub(super) use rustc_feature::{AttributeTemplate, template};
+pub(super) use rustc_attr_ir::AttributeKind;
 #[doc(hidden)]
-pub(super) use rustc_hir::attrs::AttributeKind;
-#[doc(hidden)]
-pub(super) use rustc_hir::{MethodKind, Target};
+pub(super) use rustc_attr_ir::target::{AssocCtxt, MethodKind, Target};
 #[doc(hidden)]
 pub(super) use rustc_span::{Ident, Span, Symbol, sym};
 #[doc(hidden)]
@@ -17,7 +15,7 @@ pub(super) use crate::attributes::{
 };
 // contexts
 #[doc(hidden)]
-pub(super) use crate::context::{AcceptContext, FinalizeContext};
+pub(super) use crate::context::{AcceptContext, FinalizeCheckContext, FinalizeContext};
 #[doc(hidden)]
 pub(super) use crate::parser::*;
 // target checking
@@ -27,3 +25,4 @@ pub(super) use crate::target_checking::Policy::{Allow, Error, Warn};
 pub(super) use crate::target_checking::{ALL_TARGETS, AllowedTargets};
 #[doc(hidden)]
 pub(super) use crate::unstable;
+pub(super) use crate::{AttributeTemplate, template};

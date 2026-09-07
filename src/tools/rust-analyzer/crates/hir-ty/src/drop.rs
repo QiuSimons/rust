@@ -28,10 +28,7 @@ pub fn destructor(db: &dyn HirDatabase, adt: AdtId) -> Option<ImplId> {
     let interner = DbInterner::new_with(db, module.krate(db));
     let drop_trait = interner.lang_items().Drop?;
     let impls = match module.block(db) {
-        Some(block) => match TraitImpls::for_block(db, block) {
-            Some(it) => &**it,
-            None => return None,
-        },
+        Some(block) => TraitImpls::for_block(db, block)?,
         None => TraitImpls::for_crate(db, module.krate(db)),
     };
     impls.for_trait_and_self_ty(drop_trait, &SimplifiedType::Adt(adt.into())).0.first().copied()
@@ -83,10 +80,10 @@ fn has_drop_glue_impl<'db>(
                     }
                     db.field_types(id.into())
                         .iter()
-                        .map(|(_, field_ty)| {
+                        .map(|(_, field)| {
                             has_drop_glue_impl(
                                 infcx,
-                                field_ty.get().instantiate(infcx.interner, subst).skip_norm_wip(),
+                                field.ty().instantiate(infcx.interner, subst).skip_norm_wip(),
                                 env,
                                 visited,
                             )
@@ -103,13 +100,10 @@ fn has_drop_glue_impl<'db>(
                     .map(|&(variant, _)| {
                         db.field_types(variant.into())
                             .iter()
-                            .map(|(_, field_ty)| {
+                            .map(|(_, field)| {
                                 has_drop_glue_impl(
                                     infcx,
-                                    field_ty
-                                        .get()
-                                        .instantiate(infcx.interner, subst)
-                                        .skip_norm_wip(),
+                                    field.ty().instantiate(infcx.interner, subst).skip_norm_wip(),
                                     env,
                                     visited,
                                 )

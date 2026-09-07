@@ -37,6 +37,10 @@ use crate::sync::Arc;
 ///      link ../../std/task/struct.Waker.html#impl-From%3CArc%3CW,+Global%3E%3E-for-Waker
 ///      without getting a link-checking error in CI. -->
 ///
+/// # Memory Ordering
+///
+/// To avoid missed wakeups, all executors must adhere to the requirement described for [`Waker::wake`].
+///
 /// # Examples
 ///
 /// A basic `block_on` function that takes a future and runs it to completion on
@@ -185,6 +189,7 @@ fn raw_waker<W: Wake + Send + Sync + 'static>(waker: Arc<W>) -> RawWaker {
     // within the vtables.
     #[inline(always)]
     unsafe fn clone_waker<W: Wake + Send + Sync + 'static>(waker: *const ()) -> RawWaker {
+        // ignore-tidy-undocumented-unsafe
         unsafe { Arc::increment_strong_count(waker as *const W) };
         RawWaker::new(
             waker,
@@ -194,18 +199,21 @@ fn raw_waker<W: Wake + Send + Sync + 'static>(waker: Arc<W>) -> RawWaker {
 
     // Wake by value, moving the Arc into the Wake::wake function
     unsafe fn wake<W: Wake + Send + Sync + 'static>(waker: *const ()) {
+        // ignore-tidy-undocumented-unsafe
         let waker = unsafe { Arc::from_raw(waker as *const W) };
         <W as Wake>::wake(waker);
     }
 
     // Wake by reference, wrap the waker in ManuallyDrop to avoid dropping it
     unsafe fn wake_by_ref<W: Wake + Send + Sync + 'static>(waker: *const ()) {
+        // ignore-tidy-undocumented-unsafe
         let waker = unsafe { ManuallyDrop::new(Arc::from_raw(waker as *const W)) };
         <W as Wake>::wake_by_ref(&waker);
     }
 
     // Decrement the reference count of the Arc on drop
     unsafe fn drop_waker<W: Wake + Send + Sync + 'static>(waker: *const ()) {
+        // ignore-tidy-undocumented-unsafe
         unsafe { Arc::decrement_strong_count(waker as *const W) };
     }
 
@@ -397,6 +405,7 @@ fn local_raw_waker<W: LocalWake + 'static>(waker: Rc<W>) -> RawWaker {
     // always inline.
     #[inline(always)]
     unsafe fn clone_waker<W: LocalWake + 'static>(waker: *const ()) -> RawWaker {
+        // ignore-tidy-undocumented-unsafe
         unsafe { Rc::increment_strong_count(waker as *const W) };
         RawWaker::new(
             waker,
@@ -406,18 +415,21 @@ fn local_raw_waker<W: LocalWake + 'static>(waker: Rc<W>) -> RawWaker {
 
     // Wake by value, moving the Rc into the LocalWake::wake function
     unsafe fn wake<W: LocalWake + 'static>(waker: *const ()) {
+        // ignore-tidy-undocumented-unsafe
         let waker = unsafe { Rc::from_raw(waker as *const W) };
         <W as LocalWake>::wake(waker);
     }
 
     // Wake by reference, wrap the waker in ManuallyDrop to avoid dropping it
     unsafe fn wake_by_ref<W: LocalWake + 'static>(waker: *const ()) {
+        // ignore-tidy-undocumented-unsafe
         let waker = unsafe { ManuallyDrop::new(Rc::from_raw(waker as *const W)) };
         <W as LocalWake>::wake_by_ref(&waker);
     }
 
     // Decrement the reference count of the Rc on drop
     unsafe fn drop_waker<W: LocalWake + 'static>(waker: *const ()) {
+        // ignore-tidy-undocumented-unsafe
         unsafe { Rc::decrement_strong_count(waker as *const W) };
     }
 

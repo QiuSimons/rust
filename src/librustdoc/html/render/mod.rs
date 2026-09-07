@@ -40,7 +40,8 @@ mod type_layout;
 mod write_shared;
 
 use std::borrow::Cow;
-use std::collections::VecDeque;
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt::{self, Display as _, Write};
 use std::iter::Peekable;
 use std::path::PathBuf;
@@ -52,10 +53,10 @@ use itertools::Either;
 use rustc_ast::join_path_syms;
 use rustc_data_structures::fx::{FxHashSet, FxIndexMap, FxIndexSet};
 use rustc_hir as hir;
-use rustc_hir::attrs::{AttributeKind, DeprecatedSince, Deprecation};
+use rustc_hir::attrs::{AttributeKind, DeprecatedSince, Deprecation, RustcVersion};
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{DefId, DefIdSet};
-use rustc_hir::{ConstStability, Mutability, RustcVersion, StabilityLevel, StableSince};
+use rustc_hir::{ConstStability, Mutability, StabilityLevel, StableSince};
 use rustc_middle::ty::print::PrintTraitRefExt;
 use rustc_middle::ty::{self, TyCtxt};
 use rustc_span::DUMMY_SP;
@@ -79,7 +80,7 @@ use crate::html::format::{
 use crate::html::markdown::{
     HeadingOffset, IdMap, Markdown, MarkdownItemInfo, MarkdownSummaryLine, short_markdown_summary,
 };
-use crate::html::render::print_item::compare_names;
+use crate::html::render::print_item::ImplString;
 use crate::html::render::search_index::get_function_type_for_search;
 use crate::html::static_files::SCRAPE_EXAMPLES_HELP_MD;
 use crate::html::{highlight, sources};
@@ -662,7 +663,7 @@ impl AllTypes {
     }
 }
 
-fn scrape_examples_help(shared: &SharedContext<'_>) -> String {
+fn scrape_examples_help() -> String {
     let mut content = SCRAPE_EXAMPLES_HELP_MD.to_owned();
     content.push_str(&format!(
         "## More information\n\n\
@@ -679,9 +680,10 @@ fn scrape_examples_help(shared: &SharedContext<'_>) -> String {
             content: &content,
             links: &[],
             ids: &mut IdMap::default(),
-            error_codes: shared.codes,
-            edition: shared.edition(),
-            playground: &shared.playground,
+            // code snippets come from Rust itself, not the crate
+            error_codes: crate::html::markdown::ErrorCodes::No,
+            edition: rustc_span::edition::LATEST_STABLE_EDITION,
+            playground: &Default::default(),
             heading_offset: HeadingOffset::H1,
         }
         .write_into(f))
@@ -946,7 +948,7 @@ fn short_item_info(
 fn impl_trait_key(cx: &Context<'_>, i: &Impl) -> Option<String> {
     let trait_ = i.inner_impl().trait_.as_ref()?;
     let prefix = match i.inner_impl().polarity {
-        ty::ImplPolarity::Positive | ty::ImplPolarity::Reservation => "",
+        ty::ImplPolarity::Positive => "",
         ty::ImplPolarity::Negative => "!",
     };
     Some(format!("{prefix}{:#}", print_path(trait_, cx)))
@@ -954,46 +956,50 @@ fn impl_trait_key(cx: &Context<'_>, i: &Impl) -> Option<String> {
 
 // Render the list of items inside one of the sections "Trait Implementations",
 // "Auto Trait Implementations," "Blanket Trait Implementations" (on struct/enum pages).
-fn render_impls(
-    cx: &Context<'_>,
-    mut w: impl Write,
-    impls: &[&Impl],
-    containing_item: &clean::Item,
+fn render_impls<'a, 'cx>(
+    cx: &'a Context<'cx>,
+    mut impls: Vec<&'a Impl>,
+    containing_item: &'a clean::Item,
     toggle_open_by_default: bool,
-) -> fmt::Result {
+) -> impl fmt::Display + use<'a, 'cx> {
+    impls.sort_by_cached_key(|imp| {
+        let prefix = match imp.inner_impl().polarity {
+            ty::ImplPolarity::Positive => Ordering::Greater,
+            ty::ImplPolarity::Negative => Ordering::Less,
+        };
+        (prefix, ImplString::new_path(imp, cx))
+    });
     // Render each impl alongside its `impl_trait_key`, which is used as the primary sorting key
     // to match the impl order in the sidebar.
-    let mut keyed_rendered_impls = impls
-        .iter()
-        .map(|i| {
-            let did = i.trait_did().unwrap();
-            let provided_trait_methods = i.inner_impl().provided_trait_methods(cx.tcx());
-            let assoc_link = AssocItemLink::GotoSource(did.into(), &provided_trait_methods);
-            let imp = render_impl(
-                cx,
-                i,
-                containing_item,
-                assoc_link,
-                RenderMode::Normal,
-                None,
-                &[],
-                ImplRenderingParameters {
-                    show_def_docs: true,
-                    show_default_items: true,
-                    show_non_assoc_items: true,
-                    toggle_open_by_default,
-                },
-            );
-            (impl_trait_key(cx, i).unwrap(), imp.to_string())
-        })
-        .collect::<Vec<_>>();
 
-    // Sort and then remove the `impl_trait_key`s, which are no longer needed after sorting.
-    keyed_rendered_impls
-        .sort_by(|(k1, h1), (k2, h2)| compare_names(k1, k2).then_with(|| h1.cmp(h2)));
-    let joined: String = keyed_rendered_impls.into_iter().map(|a| a.1).collect();
-
-    w.write_str(&joined)
+    fmt::from_fn(move |f| {
+        impls
+            .iter()
+            .map(|i| {
+                fmt::from_fn(|f| {
+                    let did = i.trait_did().unwrap();
+                    let provided_trait_methods = i.inner_impl().provided_trait_methods(cx.tcx());
+                    let assoc_link = AssocItemLink::GotoSource(did.into(), &provided_trait_methods);
+                    render_impl(
+                        cx,
+                        i,
+                        containing_item,
+                        assoc_link,
+                        RenderMode::Normal,
+                        None,
+                        &[],
+                        ImplRenderingParameters {
+                            show_def_docs: true,
+                            show_default_items: true,
+                            show_non_assoc_items: true,
+                            toggle_open_by_default,
+                        },
+                    )
+                    .fmt(f)
+                })
+            })
+            .joined("", f)
+    })
 }
 
 /// Build a (possibly empty) `href` attribute (a key-value pair) for the given associated item.
@@ -1415,16 +1421,12 @@ fn render_all_impls(
     mut w: impl Write,
     cx: &Context<'_>,
     containing_item: &clean::Item,
-    concrete_impls: &[&Impl],
-    auto_trait_impls: &[&Impl],
-    blanket_impls: &[&Impl],
+    concrete_impls: Vec<&Impl>,
+    auto_trait_impls: Vec<&Impl>,
+    blanket_impls: Vec<&Impl>,
 ) -> fmt::Result {
-    let impls = {
-        let mut buf = String::new();
-        render_impls(cx, &mut buf, concrete_impls, containing_item, true)?;
-        buf
-    };
-    if !impls.is_empty() {
+    if !concrete_impls.is_empty() {
+        let impls = render_impls(cx, concrete_impls, containing_item, true);
         write!(
             w,
             "{}<div id=\"trait-implementations-list\">{impls}</div>",
@@ -1433,25 +1435,24 @@ fn render_all_impls(
     }
 
     if !auto_trait_impls.is_empty() {
+        let impls = render_impls(cx, auto_trait_impls, containing_item, false);
         // FIXME: Change the ID to `auto-trait-implementations-list`!
         write!(
             w,
-            "{}<div id=\"synthetic-implementations-list\">",
+            "{}<div id=\"synthetic-implementations-list\">{impls}</div>",
             write_impl_section_heading("Auto Trait Implementations", "synthetic-implementations",)
         )?;
-        render_impls(cx, &mut w, auto_trait_impls, containing_item, false)?;
-        w.write_str("</div>")?;
     }
 
     if !blanket_impls.is_empty() {
+        let impls = render_impls(cx, blanket_impls, containing_item, false);
         write!(
             w,
-            "{}<div id=\"blanket-implementations-list\">",
+            "{}<div id=\"blanket-implementations-list\">{impls}</div>",
             write_impl_section_heading("Blanket Implementations", "blanket-implementations")
         )?;
-        render_impls(cx, &mut w, blanket_impls, containing_item, false)?;
-        w.write_str("</div>")?;
     }
+
     Ok(())
 }
 
@@ -1588,14 +1589,7 @@ fn render_assoc_items_inner(
         let (blanket_impls, concrete_impls): (Vec<&Impl>, _) =
             trait_impls.into_iter().partition(|t| t.inner_impl().kind.is_blanket());
 
-        render_all_impls(
-            w,
-            cx,
-            containing_item,
-            &concrete_impls,
-            &auto_trait_impls,
-            &blanket_impls,
-        )?;
+        render_all_impls(w, cx, containing_item, concrete_impls, auto_trait_impls, blanket_impls)?;
     }
     Ok(())
 }
@@ -1671,6 +1665,15 @@ fn should_render_item(item: &clean::Item, deref_mut_: bool, tcx: TyCtxt<'_>) -> 
     }
 }
 
+/// `Box` has pass-through impls for `Read`, `Write`, `Iterator`, and `Future` when the
+/// boxed type implements one of those. We don't want to treat every `Box` return
+/// as being notably an `Iterator` (etc), though, so we exempt it. `Pin` has the same
+/// issue, with a pass-through impl for `Future`.
+fn is_notable_trait_passthrough(did: DefId, cx: &Context<'_>) -> bool {
+    let lang_items = cx.tcx().lang_items();
+    Some(did) == lang_items.owned_box() || Some(did) == lang_items.pin_type()
+}
+
 fn notable_traits_button(ty: &clean::Type, cx: &Context<'_>) -> Option<impl fmt::Display> {
     if ty.is_unit() {
         // Very common fast path.
@@ -1679,13 +1682,7 @@ fn notable_traits_button(ty: &clean::Type, cx: &Context<'_>) -> Option<impl fmt:
 
     let did = ty.def_id(cx.cache())?;
 
-    // Box has pass-through impls for Read, Write, Iterator, and Future when the
-    // boxed type implements one of those. We don't want to treat every Box return
-    // as being notably an Iterator (etc), though, so we exempt it. Pin has the same
-    // issue, with a pass-through impl for Future.
-    if Some(did) == cx.tcx().lang_items().owned_box()
-        || Some(did) == cx.tcx().lang_items().pin_type()
-    {
+    if is_notable_trait_passthrough(did, cx) {
         return None;
     }
 
@@ -1795,6 +1792,49 @@ fn notable_traits_json<'a>(tys: impl Iterator<Item = &'a clean::Type>, cx: &Cont
     let mut mp = tys.map(|ty| notable_traits_decl(ty, cx)).collect::<IndexMap<_, _>>();
     mp.sort_unstable_keys();
     serde_json::to_string(&mp).expect("serialize (string, string) -> json object cannot fail")
+}
+
+pub(crate) struct NotableTraitBadge {
+    pub name: String,
+    pub full_path: String,
+    /// Relative URL to the trait page, or `None` if it cannot be linked.
+    pub href: Option<String>,
+}
+
+/// Returns all `#[doc(notable_trait)]` traits that `item` implements, to be
+/// rendered as badges at the top of the item's page.
+pub(crate) fn notable_trait_badges(item: &clean::Item, cx: &Context<'_>) -> Vec<NotableTraitBadge> {
+    let tcx = cx.tcx();
+    if let Some(def_id) = item.def_id()
+        && !is_notable_trait_passthrough(def_id, cx)
+        && let Some(impls) = cx.cache().impls.get(&def_id)
+    {
+        impls
+            .iter()
+            .map(Impl::inner_impl)
+            .filter(|impl_| impl_.polarity == ty::ImplPolarity::Positive)
+            .filter_map(|impl_| {
+                if let Some(trait_) = &impl_.trait_
+                    && let trait_did = trait_.def_id()
+                    && let Some(trait_) = cx.cache().traits.get(&trait_did)
+                    && trait_.is_notable_trait(tcx)
+                {
+                    let name = tcx.item_name(trait_did).to_string();
+                    let (full_path, href) = match href(trait_did, cx) {
+                        Ok(info) => (join_path_syms(&info.rust_path), Some(info.url)),
+                        Err(_) => (tcx.def_path_str(trait_did), None),
+                    };
+                    Some((name.clone(), NotableTraitBadge { name, full_path, href }))
+                } else {
+                    None
+                }
+            })
+            .collect::<BTreeMap<String, NotableTraitBadge>>()
+            .into_values()
+            .collect()
+    } else {
+        Vec::new()
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2962,7 +3002,7 @@ fn render_call_locations<W: fmt::Write>(
 fn render_attributes_in_code(
     w: &mut impl fmt::Write,
     item: &clean::Item,
-    prefix: &str,
+    prefix: impl fmt::Display,
     cx: &Context<'_>,
 ) -> fmt::Result {
     render_attributes_in_code_with_options(w, item, prefix, cx, true, "")
@@ -2971,14 +3011,14 @@ fn render_attributes_in_code(
 pub(super) fn render_attributes_in_code_with_options(
     w: &mut impl fmt::Write,
     item: &clean::Item,
-    prefix: &str,
+    prefix: impl fmt::Display,
     cx: &Context<'_>,
     render_doc_hidden: bool,
     open_tag: &str,
 ) -> fmt::Result {
     w.write_str(open_tag)?;
     if render_doc_hidden && item.is_doc_hidden() {
-        render_code_attribute(prefix, "#[doc(hidden)]", w)?;
+        render_code_attribute(&prefix, "#[doc(hidden)]", w)?;
     }
     for attr in &item.attrs.other_attrs {
         let hir::Attribute::Parsed(kind) = attr else { continue };
@@ -2993,7 +3033,7 @@ pub(super) fn render_attributes_in_code_with_options(
             AttributeKind::NonExhaustive(..) => Cow::Borrowed("#[non_exhaustive]"),
             _ => continue,
         };
-        render_code_attribute(prefix, attr.as_ref(), w)?;
+        render_code_attribute(&prefix, attr.as_ref(), w)?;
     }
 
     if let Some(def_id) = item.def_id()
@@ -3015,7 +3055,11 @@ fn render_repr_attribute_in_code(
     Ok(())
 }
 
-fn render_code_attribute(prefix: &str, attr: &str, w: &mut impl fmt::Write) -> fmt::Result {
+fn render_code_attribute(
+    prefix: impl fmt::Display,
+    attr: impl fmt::Display,
+    w: &mut impl fmt::Write,
+) -> fmt::Result {
     write!(w, "<div class=\"code-attribute\">{prefix}{attr}</div>")
 }
 
@@ -3039,10 +3083,16 @@ fn repr_attribute<'tcx>(
         (cache.document_private || field.vis.is_public()) && is_visible(field.did)
     };
 
+    // The transparent repr is public if
+    // - the non-1-ZST field is public and visible or
+    // - at least one field is public and visible if *all* fields are 1-ZSTs or
+    // - the item is annotated with internal attribute `#[rustc_pub_transparent]`
     if repr.transparent() {
-        // The transparent repr is public iff the non-1-ZST field is public and visible or
-        // – in case all fields are 1-ZST fields — at least one field is public and visible.
         let is_public = 'is_public: {
+            if hir::find_attr!(tcx, def_id, AttributeKind::RustcPubTransparent(_)) {
+                break 'is_public true;
+            }
+
             // `#[repr(transparent)]` can only be applied to structs and single-variant enums.
             let var = adt.variant(rustc_abi::FIRST_VARIANT); // the first and only variant
 
@@ -3066,18 +3116,6 @@ fn repr_attribute<'tcx>(
         // Since the transparent repr can't have any other reprs or
         // repr modifiers beside it, we can safely return early here.
         return is_public.then(|| "#[repr(transparent)]".into());
-    }
-
-    // Fast path which avoids looking through the variants and fields in
-    // the common case of no `#[repr]` or in the case of `#[repr(Rust)]`.
-    // FIXME: This check is not very robust / forward compatible!
-    if !repr.c()
-        && !repr.simd()
-        && repr.int.is_none()
-        && repr.pack.is_none()
-        && repr.align.is_none()
-    {
-        return None;
     }
 
     // The repr is public iff all components are public and visible.

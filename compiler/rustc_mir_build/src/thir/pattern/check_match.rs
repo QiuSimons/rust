@@ -1,25 +1,24 @@
 use rustc_arena::{DroplessArena, TypedArena};
 use rustc_ast::Mutability;
 use rustc_data_structures::fx::FxIndexSet;
-use rustc_data_structures::stack::ensure_sufficient_stack;
 use rustc_errors::codes::*;
 use rustc_errors::{Applicability, ErrorGuaranteed, MultiSpan, msg, struct_span_code_err};
 use rustc_hir::def::*;
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::{self as hir, BindingMode, ByRef, HirId, MatchSource};
 use rustc_infer::infer::TyCtxtInferExt;
+use rustc_lint_defs::builtin::{
+    BINDINGS_WITH_VARIANT_NAME, IRREFUTABLE_LET_PATTERNS, UNREACHABLE_PATTERNS,
+};
 use rustc_middle::bug;
 use rustc_middle::thir::visit::Visitor;
 use rustc_middle::thir::*;
 use rustc_middle::ty::print::with_no_trimmed_paths;
 use rustc_middle::ty::{self, AdtDef, Ty, TyCtxt};
-use rustc_pattern_analysis::errors::Uncovered;
+use rustc_pattern_analysis::diagnostics::Uncovered;
 use rustc_pattern_analysis::rustc::{
     Constructor, DeconstructedPat, MatchArm, RedundancyExplanation, RevealedTy,
     RustcPatCtxt as PatCtxt, Usefulness, UsefulnessReport, WitnessPat,
-};
-use rustc_session::lint::builtin::{
-    BINDINGS_WITH_VARIANT_NAME, IRREFUTABLE_LET_PATTERNS, UNREACHABLE_PATTERNS,
 };
 use rustc_span::edit_distance::find_best_match_for_name;
 use rustc_span::hygiene::DesugaringKind;
@@ -27,7 +26,7 @@ use rustc_span::{Ident, Span};
 use rustc_trait_selection::infer::InferCtxtExt;
 use tracing::instrument;
 
-use crate::errors::*;
+use crate::diagnostics::*;
 
 pub(crate) fn check_match(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Result<(), ErrorGuaranteed> {
     let typeck_results = tcx.typeck(def_id);
@@ -39,8 +38,7 @@ pub(crate) fn check_match(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Result<(), Err
         tcx,
         thir: &*thir,
         typeck_results,
-        // FIXME(#132279): We're in a body, should handle opaques.
-        typing_env: ty::TypingEnv::non_body_analysis(tcx, def_id),
+        typing_env: ty::TypingEnv::post_typeck_until_borrowck_for_mir_build(tcx, def_id),
         hir_source: tcx.local_def_id_to_hir_id(def_id),
         let_source: LetSource::None,
         pattern_arena: &pattern_arena,
@@ -60,7 +58,7 @@ pub(crate) fn check_match(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Result<(), Err
 
     for param in thir.params.iter() {
         if let Some(ref pattern) = param.pat {
-            visitor.check_binding_is_irrefutable(pattern, origin, None, None);
+            visitor.check_binding_is_irrefutable(pattern, origin, None, None, None);
         }
     }
     visitor.error
@@ -201,7 +199,7 @@ impl<'p, 'tcx> MatchVisitor<'p, 'tcx> {
     fn with_let_source(&mut self, let_source: LetSource, f: impl FnOnce(&mut Self)) {
         let old_let_source = self.let_source;
         self.let_source = let_source;
-        ensure_sufficient_stack(|| f(self));
+        f(self);
         self.let_source = old_let_source;
     }
 
@@ -316,7 +314,7 @@ impl<'p, 'tcx> MatchVisitor<'p, 'tcx> {
             // Casts don't cause a load.
             NeverToAny { source }
             | Cast { source }
-            | Use { source }
+            | ValueExpr { source }
             | PointerCoercion { source, .. }
             | PlaceTypeAscription { source, .. }
             | ValueTypeAscription { source, .. }
@@ -386,7 +384,7 @@ impl<'p, 'tcx> MatchVisitor<'p, 'tcx> {
             tcx: self.tcx,
             typeck_results: self.typeck_results,
             typing_env: self.typing_env,
-            module: self.tcx.parent_module(self.hir_source).to_def_id(),
+            module: self.tcx.parent_module(self.hir_source),
             dropless_arena: self.dropless_arena,
             match_lint_level: self.hir_source,
             whole_match_span,
@@ -436,7 +434,29 @@ impl<'p, 'tcx> MatchVisitor<'p, 'tcx> {
         assert!(self.let_source != LetSource::None);
         let scrut = scrutinee.map(|id| &self.thir[id]);
         if let LetSource::PlainLet = self.let_source {
-            self.check_binding_is_irrefutable(pat, "local binding", scrut, Some(span));
+            // `lhs = rhs` destructuring assignments are lowered to a `let` tagged
+            // `AssignDesugar`; report them as assignments, not `let` bindings (#157553).
+            if let hir::Node::LetStmt(&hir::LetStmt {
+                source: hir::LocalSource::AssignDesugar,
+                ..
+            }) = self.tcx.hir_node(self.hir_source)
+            {
+                self.check_binding_is_irrefutable(
+                    pat,
+                    "assignment",
+                    Some(Inform { descr: "destructuring assignments" }),
+                    scrut,
+                    None,
+                );
+            } else {
+                self.check_binding_is_irrefutable(
+                    pat,
+                    "local binding",
+                    Some(Inform { descr: "`let` bindings" }),
+                    scrut,
+                    Some(span),
+                );
+            }
         } else if let Ok(Irrefutable) = self.is_let_irrefutable(pat, scrut) {
             if span.from_expansion() {
                 self.lint_single_let(span, None, None);
@@ -539,6 +559,7 @@ impl<'p, 'tcx> MatchVisitor<'p, 'tcx> {
                 self.check_binding_is_irrefutable(
                     &pat_field.pattern,
                     "`for` loop binding",
+                    None,
                     None,
                     None,
                 );
@@ -645,6 +666,7 @@ impl<'p, 'tcx> MatchVisitor<'p, 'tcx> {
         &mut self,
         pat: &'p Pat<'tcx>,
         origin: &str,
+        inform: Option<Inform>,
         scrut: Option<&Expr<'tcx>>,
         sp: Option<Span>,
     ) {
@@ -657,7 +679,6 @@ impl<'p, 'tcx> MatchVisitor<'p, 'tcx> {
             return;
         }
 
-        let inform = sp.is_some().then_some(Inform);
         let mut let_suggestion = None;
         let mut misc_suggestion = None;
         let mut interpreted_as_const = None;
@@ -712,7 +733,7 @@ impl<'p, 'tcx> MatchVisitor<'p, 'tcx> {
         {
             let variant_inhabited = adt
                 .variant(*variant_index)
-                .inhabited_predicate(self.tcx, *adt)
+                .inhabited_predicate(self.tcx)
                 .instantiate(self.tcx, args);
             variant_inhabited.apply(self.tcx, cx.typing_env, cx.module)
                 && !variant_inhabited.apply_ignore_module(self.tcx, cx.typing_env)
@@ -1353,9 +1374,11 @@ fn report_non_exhaustive_match<'p, 'tcx>(
             // Arms with a never pattern don't take a body.
             pattern
         } else {
+            // ignore-tidy-todo
             format!("{pattern} => todo!()")
         }
     } else {
+        // ignore-tidy-todo
         format!("_ => todo!()")
     };
     let mut suggestion = None;

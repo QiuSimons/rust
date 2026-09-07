@@ -48,7 +48,7 @@
 //!
 //! [ill-formed-utf-16]: https://simonsapin.github.io/wtf-8/#ill-formed-utf-16
 //! [`collect`]: crate::iter::Iterator::collect
-//! [U+FFFD]: crate::char::REPLACEMENT_CHARACTER
+//! [U+FFFD]: char::REPLACEMENT_CHARACTER
 //! [`std::ffi`]: crate::ffi
 
 #![stable(feature = "rust1", since = "1.0.0")]
@@ -62,9 +62,6 @@ use crate::sys::os_str::Buf;
 use crate::sys::{AsInner, FromInner};
 
 /// Windows-specific extensions to [`OsString`].
-///
-/// This trait is sealed: it cannot be implemented outside the standard library.
-/// This is so that future additional methods are not breaking changes.
 #[stable(feature = "rust1", since = "1.0.0")]
 pub impl(self) trait OsStringExt {
     /// Creates an `OsString` from a potentially ill-formed UTF-16 slice of
@@ -75,7 +72,8 @@ pub impl(self) trait OsStringExt {
     ///
     /// # Examples
     ///
-    /// ```
+    #[cfg_attr(windows, doc = "```no_run")]
+    #[cfg_attr(not(windows), doc = "```ignore (needs windows)")]
     /// use std::ffi::OsString;
     /// use std::os::windows::prelude::*;
     ///
@@ -96,9 +94,6 @@ impl OsStringExt for OsString {
 }
 
 /// Windows-specific extensions to [`OsStr`].
-///
-/// This trait is sealed: it cannot be implemented outside the standard library.
-/// This is so that future additional methods are not breaking changes.
 #[stable(feature = "rust1", since = "1.0.0")]
 pub impl(self) trait OsStrExt {
     /// Re-encodes an `OsStr` as a wide character sequence, i.e., potentially
@@ -110,7 +105,8 @@ pub impl(self) trait OsStrExt {
     ///
     /// # Examples
     ///
-    /// ```
+    #[cfg_attr(windows, doc = "```no_run")]
+    #[cfg_attr(not(windows), doc = "```ignore (needs windows)")]
     /// use std::ffi::OsString;
     /// use std::os::windows::prelude::*;
     ///

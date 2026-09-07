@@ -32,7 +32,6 @@ use crate::{
     traits::StoredParamEnvAndCrate,
 };
 
-pub(crate) use self::adt::layout_of_adt_cycle_result;
 pub use self::{adt::layout_of_adt_query, target::target_data_layout_query};
 
 pub(crate) mod adt;
@@ -148,7 +147,7 @@ fn layout_of_simd_ty<'db>(
     let mut fields = fields.iter();
     let Some(TyKind::Array(e_ty, e_len)) =
         fields.next().filter(|_| fields.next().is_none()).map(|f| {
-            (*f.1).get().instantiate(DbInterner::new_no_crate(db), args).skip_norm_wip().kind()
+            (*f.1).ty().instantiate(DbInterner::new_no_crate(db), args).skip_norm_wip().kind()
         })
     else {
         return Err(LayoutError::InvalidSimdType);
@@ -161,6 +160,7 @@ fn layout_of_simd_ty<'db>(
     Ok(Arc::new(cx.calc.simd_type(e_ly, e_len, repr_packed)?))
 }
 
+#[salsa::tracked(cycle_result = layout_of_ty_cycle_result, returns(clone))]
 pub fn layout_of_ty_query(
     db: &dyn HirDatabase,
     ty: StoredTy,
@@ -176,7 +176,7 @@ pub fn layout_of_ty_query(
     let infer_ctxt = interner.infer_ctxt().build(TypingMode::PostAnalysis);
     let cause = ObligationCause::dummy();
     let ty = infer_ctxt
-        .at(&cause, trait_env.param_env())
+        .at(&cause, trait_env.param_env(db))
         .deeply_normalize(ty.as_ref())
         .unwrap_or(ty.as_ref());
     let result = match ty.kind() {
@@ -190,7 +190,7 @@ pub fn layout_of_ty_query(
                             s,
                             repr.packed(),
                             &args,
-                            trait_env.as_ref(),
+                            trait_env.as_ref(db),
                             target,
                         );
                     }
@@ -355,11 +355,11 @@ pub fn layout_of_ty_query(
                 PatternKind::Range { start, end } => {
                     if let BackendRepr::Scalar(scalar) = &mut layout.backend_repr {
                         scalar.valid_range_mut().start = extract_const_value(start)?
-                            .try_to_bits(db, trait_env.as_ref())
+                            .try_to_bits(db, trait_env.as_ref(db))
                             .ok_or(LayoutError::Unknown)?;
 
                         scalar.valid_range_mut().end = extract_const_value(end)?
-                            .try_to_bits(db, trait_env.as_ref())
+                            .try_to_bits(db, trait_env.as_ref(db))
                             .ok_or(LayoutError::Unknown)?;
 
                         // FIXME(pattern_types): create implied bounds from pattern types in signatures
@@ -418,17 +418,15 @@ pub fn layout_of_ty_query(
                                 .iter()
                                 .map(|pat| match pat.kind() {
                                     PatternKind::Range { start, end } => Ok::<_, LayoutError>((
-                                        extract_const_value(start)
-                                            .unwrap()
-                                            .try_to_bits(db, trait_env.as_ref())
+                                        extract_const_value(start)?
+                                            .try_to_bits(db, trait_env.as_ref(db))
                                             .ok_or(LayoutError::Unknown)?,
-                                        extract_const_value(end)
-                                            .unwrap()
-                                            .try_to_bits(db, trait_env.as_ref())
+                                        extract_const_value(end)?
+                                            .try_to_bits(db, trait_env.as_ref(db))
                                             .ok_or(LayoutError::Unknown)?,
                                     )),
                                     PatternKind::NotNull | PatternKind::Or(_) => {
-                                        unreachable!("mixed or patterns are not allowed")
+                                        Err(LayoutError::Unknown)
                                     }
                                 })
                                 .collect();
@@ -505,7 +503,7 @@ pub fn layout_of_ty_query(
     Ok(Arc::new(result))
 }
 
-pub(crate) fn layout_of_ty_cycle_result(
+fn layout_of_ty_cycle_result(
     _: &dyn HirDatabase,
     _: salsa::Id,
     _: StoredTy,
@@ -567,7 +565,7 @@ fn field_ty<'a>(
     fd: LocalFieldId,
     args: GenericArgs<'a>,
 ) -> Ty<'a> {
-    db.field_types(def)[fd].get().instantiate(DbInterner::new_no_crate(db), args).skip_norm_wip()
+    db.field_types(def)[fd].ty().instantiate(DbInterner::new_no_crate(db), args).skip_norm_wip()
 }
 
 fn scalar_unit(dl: &TargetDataLayout, value: Primitive) -> Scalar {

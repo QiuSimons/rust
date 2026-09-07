@@ -27,6 +27,23 @@ impl<'tcx> MutVisitor<'tcx> for FixReturnPendingVisitor<'tcx> {
             && let AggregateKind::Adt(_, _, ref mut args, _, _) = **kind
         {
             *args = self.tcx.mk_args(&[self.tcx.types.unit.into()]);
+        } else if let Rvalue::Use(Operand::Constant(constant), _) = rvalue {
+            if let Some(async_gen_pending_def_id) = self.tcx.lang_items().async_gen_pending()
+                && let Const::Unevaluated(unevaluated, _) = constant.const_
+                && unevaluated.def == async_gen_pending_def_id
+            {
+                let poll_def_id = self.tcx.lang_items().poll().unwrap();
+                *rvalue = Rvalue::Aggregate(
+                    Box::new(AggregateKind::Adt(
+                        poll_def_id,
+                        VariantIdx::from_u32(1),
+                        self.tcx.mk_args(&[self.tcx.types.unit.into()]),
+                        None,
+                        None,
+                    )),
+                    IndexVec::new(),
+                );
+            }
         }
     }
 }
@@ -91,6 +108,7 @@ pub(super) fn elaborate_coroutine_drops<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body
             Terminator {
                 source_info,
                 kind: TerminatorKind::Drop { place, target, unwind, replace: _, drop },
+                ..
             } => {
                 if let Some(local) = place.as_local()
                     && local == SELF_ARG
@@ -205,7 +223,7 @@ pub(super) fn create_coroutine_drop_shim<'tcx>(
     // Update the body's def to become the drop glue.
     let coroutine_instance = body.source.instance;
     let drop_glue = tcx.require_lang_item(LangItem::DropGlue, body.span);
-    let drop_instance = InstanceKind::DropGlue(drop_glue, Some(coroutine_ty));
+    let drop_instance = InstanceKind::Shim(ShimKind::DropGlue(drop_glue, Some(coroutine_ty)));
 
     // Temporary change MirSource to coroutine's instance so that dump_mir produces more sensible
     // filename.
@@ -308,6 +326,10 @@ pub(super) fn create_coroutine_drop_shim_async<'tcx>(
     // Run derefer to fix Derefs that are not in the first place
     deref_finder(tcx, &mut body, false);
 
+    if transform.coroutine_kind.is_async_desugaring() {
+        transform_async_context(tcx, &mut body);
+    }
+
     if let Some(dumper) = MirDumper::new(tcx, "coroutine_drop_async", &body) {
         dumper.dump_mir(&body);
     }
@@ -320,6 +342,7 @@ pub(super) fn create_coroutine_drop_shim_async<'tcx>(
 pub(super) fn create_coroutine_drop_shim_proxy_async<'tcx>(
     tcx: TyCtxt<'tcx>,
     body: &Body<'tcx>,
+    coroutine_kind: CoroutineKind,
 ) -> Body<'tcx> {
     let mut body = body.clone();
     // Take the coroutine info out of the body, since the drop shim is
@@ -352,10 +375,15 @@ pub(super) fn create_coroutine_drop_shim_proxy_async<'tcx>(
         replace: false,
         drop: None,
     };
-    body.basic_blocks_mut()[call_bb].terminator = Some(Terminator { source_info, kind });
+    body.basic_blocks_mut()[call_bb].terminator =
+        Some(Terminator { source_info, kind, attributes: ThinVec::new() });
 
     // Run derefer to fix Derefs that are not in the first place
     deref_finder(tcx, &mut body, false);
+
+    if coroutine_kind.is_async_desugaring() {
+        transform_async_context(tcx, &mut body);
+    }
 
     if let Some(dumper) = MirDumper::new(tcx, "coroutine_drop_proxy_async", &body) {
         dumper.dump_mir(&body);

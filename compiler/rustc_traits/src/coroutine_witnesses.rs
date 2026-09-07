@@ -38,20 +38,30 @@ pub(crate) fn coroutine_hidden_types<'tcx>(
 
     let assumptions = compute_assumptions(tcx, def_id, bound_tys);
 
-    ty::EarlyBinder::bind(ty::Binder::bind_with_vars(
-        ty::CoroutineWitnessTypes { types: bound_tys, assumptions },
-        tcx.mk_bound_variable_kinds(&vars),
-    ))
+    ty::EarlyBinder::bind(
+        tcx,
+        ty::Binder::bind_with_vars(
+            ty::CoroutineWitnessTypes { types: bound_tys, assumptions },
+            tcx.mk_bound_variable_kinds(&vars),
+        ),
+    )
 }
 
+// FIXME: The assumptions are only used in the old solver when `-Zhigher-ranked-assumptions`
+// is true. `-Zhigher-ranked-assumptions` is superseded by `assumptions-on-binders`.
+// We can remove this function soon.
 fn compute_assumptions<'tcx>(
     tcx: TyCtxt<'tcx>,
     def_id: DefId,
     bound_tys: &'tcx ty::List<Ty<'tcx>>,
-) -> &'tcx ty::List<ty::ArgOutlivesPredicate<'tcx>> {
-    let infcx = tcx.infer_ctxt().build(ty::TypingMode::Analysis {
-        defining_opaque_types_and_generators: ty::List::empty(),
-    });
+) -> &'tcx ty::List<ty::ArgOutlivesClause<'tcx>> {
+    if tcx.next_trait_solver_globally() || !tcx.sess.opts.unstable_opts.higher_ranked_assumptions {
+        return &ty::List::empty();
+    }
+
+    let infcx = tcx
+        .infer_ctxt()
+        .build(ty::TypingMode::Typeck { defining_opaque_types_and_generators: ty::List::empty() });
     with_replaced_escaping_bound_vars(&infcx, &mut vec![None], bound_tys, |bound_tys| {
         let param_env = tcx.param_env(def_id);
         let ocx = ObligationCtxt::new(&infcx);

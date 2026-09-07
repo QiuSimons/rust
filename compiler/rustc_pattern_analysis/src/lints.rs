@@ -1,10 +1,12 @@
-use rustc_session::lint::builtin::NON_EXHAUSTIVE_OMITTED_PATTERNS;
+use rustc_lint_defs::builtin::NON_EXHAUSTIVE_OMITTED_PATTERNS;
 use rustc_span::ErrorGuaranteed;
 use tracing::instrument;
 
 use crate::MatchArm;
 use crate::constructor::Constructor;
-use crate::errors::{NonExhaustiveOmittedPattern, NonExhaustiveOmittedPatternLintOnArm, Uncovered};
+use crate::diagnostics::{
+    NonExhaustiveOmittedPattern, NonExhaustiveOmittedPatternLintOnArm, Uncovered,
+};
 use crate::pat_column::PatternColumn;
 use crate::rustc::{RevealedTy, RustcPatCtxt, WitnessPat};
 
@@ -92,7 +94,7 @@ pub(crate) fn lint_nonexhaustive_missing_variants<'p, 'tcx>(
             let level_spec =
                 rcx.tcx.lint_level_spec_at_node(NON_EXHAUSTIVE_OMITTED_PATTERNS, arm.arm_data);
             let level = level_spec.level();
-            if level != rustc_session::lint::Level::Allow {
+            if level != rustc_lint_defs::Level::Allow {
                 rcx.tcx.dcx().emit_warn(NonExhaustiveOmittedPatternLintOnArm {
                     span: arm.pat.data().span,
                     lint_span: level_spec.src.span(),

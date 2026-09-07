@@ -1,5 +1,5 @@
 use rustc_errors::codes::*;
-use rustc_errors::{DiagArgFromDisplay, DiagSymbolList};
+use rustc_errors::{DiagArgFromDisplay, DiagArgValue, DiagSymbolList, IntoDiagArg};
 use rustc_macros::{Diagnostic, Subdiagnostic};
 use rustc_span::{Ident, Span, Symbol};
 
@@ -120,6 +120,17 @@ pub(crate) struct AwaitOnlyInAsyncFnAndBlocks {
     pub await_kw_span: Span,
     #[label("this is not `async`")]
     pub item_span: Option<Span>,
+}
+
+#[derive(Diagnostic)]
+#[diag("a function cannot be both `comptime` and `const`")]
+pub(crate) struct ConstComptimeFn {
+    #[primary_span]
+    #[suggestion("remove the `const`", applicability = "machine-applicable", code = "")]
+    #[note("`const` implies the function can be called at runtime, too")]
+    pub span: Span,
+    #[label("`comptime` because of this")]
+    pub attr_span: Span,
 }
 
 #[derive(Diagnostic)]
@@ -354,6 +365,7 @@ pub(crate) struct MatchArmWithNoBody {
     pub span: Span,
     #[suggestion(
         "add a body after the pattern",
+        // ignore-tidy-todo
         code = " => todo!(),",
         applicability = "has-placeholders"
     )]
@@ -548,4 +560,52 @@ pub(crate) struct DelegationBlockSpecifiedWhenNoParams {
 pub(crate) struct DelegationAttemptedBlockWithDefsDeletion {
     #[primary_span]
     pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag("wrong infer used: expected {$expected}, found: {$actual}")]
+pub(crate) struct DelegationInfersMismatch {
+    #[primary_span]
+    pub span: Span,
+    pub expected: Symbol,
+    pub actual: Symbol,
+}
+
+#[derive(Diagnostic)]
+#[diag(
+    "attempted to lower target expression with definitions more than once while mapping argument"
+)]
+pub(crate) struct DelegationAttemptedBlockWithDefsRelowering {
+    #[primary_span]
+    pub span: Span,
+}
+
+/// Whether resolving `impl` or `mut` restriction paths
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ResolvingRestrictionKind {
+    Impl,
+    Mut,
+}
+
+impl IntoDiagArg for ResolvingRestrictionKind {
+    fn into_diag_arg(self, _: &mut Option<std::path::PathBuf>) -> DiagArgValue {
+        use std::borrow::Cow;
+        match self {
+            ResolvingRestrictionKind::Impl => DiagArgValue::Str(Cow::Borrowed("impl")),
+            ResolvingRestrictionKind::Mut => DiagArgValue::Str(Cow::Borrowed("mut")),
+        }
+    }
+}
+
+#[derive(Diagnostic)]
+#[diag(
+    "{$kind ->
+    [impl] trait implementation
+    *[mut] field mutation
+} can only be restricted to ancestor modules"
+)]
+pub(crate) struct RestrictionAncestorOnly {
+    #[primary_span]
+    pub(crate) span: Span,
+    pub(crate) kind: ResolvingRestrictionKind,
 }
